@@ -587,13 +587,18 @@ static void sc_intback_rtc_tick(void)
 	 * still -- which is what made the first version of this scenario read
 	 * the same second at 4 000 000 ticks as at 1 700 000.
 	 *
-	 * 330 NTSC frames is 5.5 s, so the clock has advanced five seconds and
-	 * is half a second clear of both the five- and six-second boundaries.
-	 * Measured, not assumed: 300 frames also reports 0x10 and 360 reports
-	 * 0x11, so the answer holds across a whole second's worth of frames and
-	 * this sits in the middle of it.  That is also the check that a frame is
-	 * worth 1/60 s and not something else, which is the calibration the
-	 * harness previously had wrong by 61x.
+	 * 330 NTSC frames.  Five seconds of the clock have passed, because 330
+	 * frames is 5.5 s of video at 60 Hz and the RTC is whole seconds.  The
+	 * margin is thinner than that suggests and worth stating: the model is
+	 * in its power-on 26 MHz mode while the frames claim 28 MHz, so a frame
+	 * is worth 1.0654 model seconds and 330 of them is 5.858, not 5.5 --
+	 * 0.86 past the five-second mark and only 0.14 short of six.
+	 *
+	 * Measured rather than assumed: 300 frames also reports 0x10, 315 and
+	 * 330 do too, and 345 already reports 0x11.  So the answer holds across
+	 * 45 frames below and 15 above, and this sits in the stable middle.
+	 * That double check is also what pins the calibration the harness had
+	 * wrong by 61x: before the fix the same scenario read 61.2x too fast.
 	 */
 	trace_mark("intback_rtc_tick (the RTC rolls over, in BCD, on its own)");
 	setup_common(0x5, TB_CLOCK_NTSC_352, true);
@@ -627,22 +632,32 @@ static void sc_intback_rtc_oscillator(void)
 	 *
 	 * 50 000 ppm is 5%, which is far worse than a real tuning-fork crystal
 	 * (~20 ppm).  It is exaggerated on purpose: at 5% fifty seconds of
-	 * running time separates the two readings by two whole seconds, so the
-	 * effect is unmistakable in a test that runs in a second.  At a
-	 * realistic 20 ppm the same gap needs about four minutes of model time,
-	 * which the harness cannot reach anyway -- see the note on frame count
-	 * below.
+	 * running time already separates the two readings by a couple of whole
+	 * seconds, so the effect is unmistakable in a test that runs in a
+	 * second.  At a realistic 20 ppm the same gap needs four minutes of
+	 * model time, and the harness cannot reach that -- see the note on frame
+	 * count below.
 	 *
-	 * 3 000 NTSC frames is 50 s.  At 0 ppm that is 50 model seconds, giving
-	 * 15:04:55; at +50 000 ppm the watch crystal runs 5% fast and gets to
-	 * 52, giving 15:04:57.  Expect the later one.  52.5 model seconds sits
-	 * clear of both boundaries, and the reference backend, which has no such
-	 * concept, will report the earlier time.
+	 * 4 200 NTSC frames, and the arithmetic in full because the obvious
+	 * version of it is wrong here.  A frame is 477 082 master ticks, so
+	 * 4 200 frames is 70 s of *video*.  But the model is in its power-on
+	 * 26 MHz mode -- nothing has issued CKCHG352 -- while the frames claim
+	 * 28 MHz, so host ticks convert to core clocks at 4e6 * 65 / (28 636 364
+	 * * 61) = 0.148845 rather than 0.139670, a frame is worth 1.0654 model
+	 * seconds, and 4 200 frames is 74.55 model seconds, not 70.  At
+	 * +50 000 ppm the watch crystal runs 5% fast, so its second is
+	 * 3 800 000 core clocks and the same interval is 78.485.
 	 *
-	 * The frame count is bounded by the harness's int32 timestamp: an NTSC
-	 * frame is 477 082 master ticks, so 4 500 frames is the ceiling before
-	 * g_ts overflows and tb_advance_to() reports that time went backwards.
-	 * That is why the ppm is exaggerated rather than the run lengthened.
+	 * Expect 15:05:23, not the 15:05:19 a nominal crystal reports.  78.485
+	 * clears both boundaries: 78.4 and 78.6 frames also report 15:05:23, so
+	 * the answer holds across 200 frames, a third of a second of model
+	 * time.  The first choice of 3 000 frames was not usable -- it landed on
+	 * 56.06, a hundredth of a second past a boundary.
+	 *
+	 * The frame count is bounded by the harness's int32 timestamp: 4 500
+	 * frames is the ceiling before g_ts overflows and tb_advance_to()
+	 * reports that time went backwards.  That is why the ppm is exaggerated
+	 * rather than the run lengthened.
 	 */
 	trace_mark("intback_rtc_oscillator (+50000 ppm on the watch crystal)");
 	setup_common(0x5, TB_CLOCK_NTSC_352, true);
@@ -651,10 +666,11 @@ static void sc_intback_rtc_oscillator(void)
 	tb_backend->set_rtc_oscillator(50000);
 	tb_backend->reset(false);
 
-	for (int i = 0; i < 3000; i++) {
+	for (int i = 0; i < 4200; i++) {
 		tb_backend->start_frame();
 		run_frame();
 	}
+
 
 	intback_exchange(0x10, iregs, 3);
 	tb_advance(1000);

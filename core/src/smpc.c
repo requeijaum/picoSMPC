@@ -2365,12 +2365,21 @@ void smpc_init(Smpc *s, const SmpcEnv *env, uint8_t area_code,
 		s->port[p].tap = smpc_multitap_create();
 	}
 
+	/* The RTC's second length is derived state, and init has just memset
+	 * this to zero.  do_vblank_housekeeping() drains the clock with
+	 * `while (accum >= rtc_second_clocks)`, which with both at zero never
+	 * terminates: the accumulator is not decremented by anything.  Nothing
+	 * resets it, because a reset is deliberately not done here.  smpc_reset()
+	 * establishes it too, for the ordinary path. */
+	rtc_recompute_second(s);
+
 	/* A reset is deliberately *not* performed here.  Mednafen splits
 	 * SMPC_Init (device construction) from SMPC_Reset (state), and the
 	 * harness calls both; doing the reset inside init as well would
-	 * double every reset side effect and, more importantly, would hide
-	 * the difference between "powered up" and "reset while running". */
+	 * double every reset side effect and, more importantly, would hide the
+	 * difference between "powered up" and "reset while running". */
 }
+
 
 void smpc_kill(Smpc *s)
 {

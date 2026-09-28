@@ -127,8 +127,9 @@ rather than accuracy by itself. The tolerance is deliberately kept off
 number of core clocks in a watch-crystal second is the same in both modes.
 
 `intback_rtc_oscillator` exercises it at +50 000 ppm, five per cent, which is
-far worse than any real crystal, so that fifty seconds of running time
-separates the two readings by two whole seconds. Its expectation is **not**
+far worse than any real crystal, so that seventy seconds of running time
+separates the two readings by four whole seconds — 15:05:23 against the
+15:05:19 a nominal crystal reports. Its expectation is **not**
 in either column: a synthetic tolerance has no hardware counterpart, so there
 is nothing to derive the expected clock from, and recording a measured value
 would be exactly the guess the `--` policy exists to prevent.
