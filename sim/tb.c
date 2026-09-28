@@ -589,16 +589,19 @@ static void sc_intback_rtc_tick(void)
 	 *
 	 * 330 NTSC frames.  Five seconds of the clock have passed, because 330
 	 * frames is 5.5 s of video at 60 Hz and the RTC is whole seconds.  The
-	 * margin is thinner than that suggests and worth stating: the model is
-	 * in its power-on 26 MHz mode while the frames claim 28 MHz, so a frame
-	 * is worth 1.0654 model seconds and 330 of them is 5.858, not 5.5 --
-	 * 0.86 past the five-second mark and only 0.14 short of six.
+	 * margin is lopsided and worth stating: the model is in its power-on
+	 * 26 MHz mode while the frames claim 28 MHz, so a frame is worth 1.0654
+	 * model seconds and 330 of them is 5.858, not 5.5 -- 0.86 past the
+	 * five-second mark, but only 0.14 short of six.
 	 *
-	 * Measured rather than assumed: 300 frames also reports 0x10, 315 and
-	 * 330 do too, and 345 already reports 0x11.  So the answer holds across
-	 * 45 frames below and 15 above, and this sits in the stable middle.
-	 * That double check is also what pins the calibration the harness had
-	 * wrong by 61x: before the fix the same scenario read 61.2x too fast.
+	 * Measured rather than assumed, and the two sides are not alike: 0x10
+	 * holds from 285 frames to 335, so this sits 47 frames clear of the
+	 * lower boundary and only 8 from the upper.  Those 8 frames are 0.14 s.
+	 * The count is a literal and the run is deterministic, so a thin margin
+	 * is not fragile here -- it only means a future change to the harness's
+	 * clock calibration would have to re-derive this expectation rather than
+	 * leave it alone.  The same double check is what pins the calibration
+	 * that used to be 61x out: before the fix the scenario read 61.2x fast.
 	 */
 	trace_mark("intback_rtc_tick (the RTC rolls over, in BCD, on its own)");
 	setup_common(0x5, TB_CLOCK_NTSC_352, true);
