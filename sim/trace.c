@@ -124,3 +124,58 @@ int trace_write(FILE *f)
 		fprintf(f, "%s\n", g_lines[i]);
 	return g_count;
 }
+
+/*
+ * Strip the `[timestamp]` column and split the payload into MARK / REG / EVT.
+ *
+ * The stored line is always `[%11d] ` followed by either `== <label>`,
+ * `   <name>       = <hex...>` or an event; the reformat is pure string
+ * surgery on a format this file itself produced, so there is nothing to
+ * keep in step with a second parser.
+ */
+int trace_write_canonical(FILE *f)
+{
+	int n = 0;
+
+	for (int i = 0; i < g_count; i++) {
+		const char *p = g_lines[i];
+		const char *eq;
+		char name[40];
+		int len;
+
+		if (strlen(p) <= 13)
+			continue;
+		p += 13;			/* past "[%11d]" */
+		while (*p == ' ')
+			p++;
+
+		if (!strncmp(p, "== ", 3)) {
+			fprintf(f, "MARK %s\n", p + 3);
+			n++;
+			continue;
+		}
+
+		eq = strchr(p, '=');
+		if (!eq) {
+			fprintf(f, "EVT  %s\n", p);
+			n++;
+			continue;
+		}
+
+		len = (int)(eq - p);
+		while (len > 0 && p[len - 1] == ' ')
+			len--;
+		if (len <= 0) {
+			fprintf(f, "EVT  %s\n", p);
+			n++;
+			continue;
+		}
+		if (len > (int)sizeof name - 1)
+			len = (int)sizeof name - 1;
+		memcpy(name, p, len);
+		name[len] = 0;
+		fprintf(f, "REG  %s %s\n", name, eq + 1);
+		n++;
+	}
+	return n;
+}

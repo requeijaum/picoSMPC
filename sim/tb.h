@@ -111,15 +111,35 @@ void    tb_advance(int32_t delta);
 int32_t tb_master_clock_hz(int clock_mode);
 int32_t tb_line_cycles(int clock_mode);	/* one scanline, in master clocks */
 
-/* Peripheral input buffer layouts must match what the device models read. */
+/*
+ * Field layout of the 16-byte input buffer each backend is handed for a
+ * port, matching what the device models read (core/src/iodev.c) and what
+ * Ymir and Mednafen consume.
+ *
+ * These are offsets *within* one port's buffer, not indices into a combined
+ * multi-device buffer.  The testbench gives every port its own buffer, so a
+ * scenario writes a pad's buttons at TB_PAD_3DPAD, and the device reads them
+ * from offset 0 of the same buffer.  Using them as offsets into a shared
+ * buffer silently dropped every scenario's stimulus: the device models saw
+ * zeros, and the analog flag, the thumbsticks and the trigger values were
+ * never loaded at all.
+ */
 enum
 {
-	TB_PAD_GAMEPAD = 0,	/* 16 bytes: 2 buttons + 2x pad + 12 reserved */
-	TB_PAD_3DPAD   = 2,	/* 16 bytes: 2 buttons + 4 thumb + 4 shoulder  */
-	TB_PAD_MOUSE   = 4,	/* 8 bytes */
-	TB_PAD_WHEEL   = 6,
-	TB_PAD_MISSION = 8,
-	TB_PAD_GUN     = 10
+	TB_PAD_BTN    = 0,	/* 2 bytes, active high = pressed            */
+	TB_PAD_THUMBX = 2,	/* 2 bytes, signed, 0x8000 = centre           */
+	TB_PAD_THUMBY = 4,
+	TB_PAD_SHLDL  = 6,	/* 2 bytes each, scaled to 0..255            */
+	TB_PAD_SHLDR  = 8,
+
+	/* The multi-tap's sub-slots reuse the pad layout at the same offsets,
+	 * so there is no separate base for them. */
+	TB_PAD_3DPAD  = TB_PAD_BTN,
+	TB_PAD_GAMEPAD = TB_PAD_BTN,
+	TB_PAD_MOUSE   = 0,	/* mouse: dX, dY (2 x int16), then buttons   */
+	TB_PAD_WHEEL   = 0,
+	TB_PAD_MISSION = 0,
+	TB_PAD_GUN     = 0
 };
 
 void tb_pad_clear(uint8_t *buf);

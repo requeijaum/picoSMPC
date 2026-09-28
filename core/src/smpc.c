@@ -14,6 +14,7 @@
  * is the only reference in the tree that models this at cycle level, and
  * because sim/ can diff the two byte for byte.
  */
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -135,14 +136,18 @@ enum
 	OP_IF_CTR_NONZERO,	/* arg = counter | target << 8                  */
 	OP_SET_ID1,	/* id1 = de-scrambled pair of work[0], work[1]      */
 	OP_SET_ID2,	/* id2 = nybble(work[0]) << 4 | nybble(work[1])    */
-	OP_SET_IDTAP,	/* id_tap = (id2 & 0xF) << 4 | nybble(work[3])     */
+	OP_SET_ID2_TAP,	/* id2 from a sub-slot; leaves is_tap alone    */
+	OP_SET_IDTAP,	/* id_tap = (id2 & 0xF) << 4 | nybble(work[2])     */
 	OP_SET_IDTAP_DIRECT,	/* id_tap = 0xF1                           */
 	OP_FORCE_MOUSE_ID,	/* arg = the id1 that implies a mouse        */
 	OP_STORE_DATABYTE,	/* read_buffer[ctr] = work[0..1], ctr++      */
 	OP_LOAD_DATABYTE,	/* work[0] = read_buffer[ctr], ctr++          */
 	OP_NEXT_PORT,	/* advance to the next front-panel port          */
 	OP_IF_MULTI,	/* arg = target when a multi-tap IS present      */
-	OP_IF_NOT_MULTI	/* arg = target when there is NO multi-tap      */
+	OP_IF_NOT_MULTI,	/* arg = target when there is NO multi-tap      */
+	OP_IF_CTRMAX_ZERO,	/* arg = counter | target << 8; taken when the  */
+				/* loop bound is 0 (a do-while would still run)  */
+	OP_IF_TAP_LE1		/* arg = target when a tap has <= 1 sub-device  */
 };
 
 /* Counter registers for OP_ENDREPEAT / OP_SET_CTRMAX. */
@@ -526,6 +531,28 @@ void smpc_set_area_code(Smpc *s, uint8_t code)
  * the peripheral.  A TH reading low while external latch is enabled is what
  * latches the light-gun crosshair and raises the PAD interrupt.
  */
+/*
+ * Which configured device answers on a physical port.
+ *
+ * Beetle walks one cursor over VirtualPorts: a tap on port 0 swallows six
+ * entries, so port 1 lands on entry 6 and finds nothing there.  Returning
+ * ~0u for "the port answers as the tap itself" and any value >= 6 for
+ * "nothing plugged in" reproduces that without widening devices[].
+ */
+static unsigned port_device_index(const Smpc *s, unsigned port)
+{
+	unsigned vp = 0;
+
+	for (unsigned sp = 0; sp < SMPC_PORT_COUNT; sp++) {
+		const bool tap = s->port[sp].tap_enabled && s->port[sp].tap;
+
+		if (sp == port)
+			return tap ? ~(unsigned)0 : vp;
+		vp += tap ? 6u : 1u;
+	}
+	return ~(unsigned)0;
+}
+
 static void update_io_bus(Smpc *s, unsigned port)
 {
 	struct SmpcPort *p;
@@ -544,10 +571,14 @@ static void update_io_bus(Smpc *s, unsigned port)
 
 	if (p->tap_enabled && p->tap)
 		state = smpc_multitap_update_bus(p->tap, seen, driven);
-	else if (s->devices[port])
-		state = smpc_iodev_update_bus(s->devices[port], seen, driven);
-	else
-		state = (uint8_t)((seen & (driven | 0xE0)) | 0x7F);
+	else {
+		const unsigned di = port_device_index(s, port);
+
+		if (di < 6 && s->devices[di])
+			state = smpc_iodev_update_bus(s->devices[di], seen, driven);
+		else
+			state = (uint8_t)((seen & (driven | 0xE0)) | 0x7F);
+	}
 
 	p->io_state = state;
 
@@ -629,7 +660,7 @@ static void emit_nyb_reg(Smpc *s, int reg, int high)
 static void emit_nyb_work(Smpc *s, int idx) { emit(s, OP_NYB, pack_nyb(SRC_WORK, idx)); }
 static void emit_nyb_work_or7(Smpc *s, int idx) { emit(s, OP_NYB, pack_nyb(SRC_WORK_OR7, idx)); }
 
-/* Register index for OP_NYB, packed as kind | (index << 1) where kind picks
+/* Register index for OP_NYB, packed as kind | (index << 3) where kind picks
  * the high or low nybble: 0 = id1, 1 = id2, 2 = id_tap. */
 static uint8_t reg_byte(Smpc *s, int reg)
 {
@@ -643,12 +674,22 @@ static uint8_t reg_byte(Smpc *s, int reg)
 static uint8_t nyb_source(Smpc *s, uint8_t desc)
 {
 	const int kind = desc & 0x07;
-	const int arg = (desc >> 3) & 0x07;
+	/* Four bits, not three: a constant nybble is 0..15 and the `F` of the
+	 * `F1 02` report header is 0xF, so a 3-bit mask turned it into 0x7 and
+	 * the id1 == 0xB branch -- the one generation that does not negotiate,
+	 * reachable only from a plain gamepad -- reported 0x71 as its header.
+	 * The register and work sources mask their own index to what they can
+	 * address, so nothing else is affected. */
+	const int arg = (desc >> 3) & 0x0F;
 
 	switch (kind) {
 	case SRC_CONST:    return (uint8_t)(arg & 0x0F);
-	case SRC_REG_HI:   return (uint8_t)(reg_byte(s, arg & 1) >> 4);
-	case SRC_REG_LO:   return (uint8_t)(reg_byte(s, arg & 1) & 0x0F);
+	/* Mask with 3, not 1: index 2 is id_tap, and the multi-tap header
+	 * emits both of its nybbles through these two cases.  Masking it to
+	 * one bit silently replaced id_tap with id1, so the adapter header
+	 * came out as the id nybble of whatever was plugged into the port. */
+	case SRC_REG_HI:   return (uint8_t)(reg_byte(s, arg & 3) >> 4);
+	case SRC_REG_LO:   return (uint8_t)(reg_byte(s, arg & 3) & 0x0F);
 	case SRC_WORK:     return (uint8_t)(s->jr.work[arg & 7] & 0x0F);
 	case SRC_WORK_OR7: return (uint8_t)((s->jr.work[arg & 7] & 0x0F) | 0x7);
 	default:           return 0;
@@ -777,6 +818,16 @@ static int report_step(Smpc *s)
 			if (!s->jr.owp && s->jr.pd_counter < 0xFF)
 				s->jr.pd_counter++;
 
+			if (getenv("SMPC_PROG")) {
+				static const char *const kn[] = { "CONST", "REG_HI", "REG_LO", "WORK", "WORK_OR7" };
+				fprintf(stderr, "  NYB owp=%u port=%u ctrTAP=%u/%u ctrDATA=%u/%u id1=%02X id2=%02X idtap=%02X src=%s:%u w=%02X%02X%02X%02X\n",
+				        s->jr.owp, s->jr.cur_port,
+				        s->jr.ctr[1], s->jr.ctr_max[1],
+				        s->jr.ctr[2], s->jr.ctr_max[2],
+				        s->jr.id1, s->jr.id2, s->jr.id_tap,
+				        (arg & 7) < 5 ? kn[arg & 7] : "?", (arg >> 3) & 0xF,
+				        s->jr.work[0], s->jr.work[1], s->jr.work[2], s->jr.work[3]);
+			}
 			s->oreg[s->jr.owp >> 1] &=
 				(uint8_t)(0x0F << ((s->jr.owp & 1) << 2));
 			s->oreg[s->jr.owp >> 1] |=
@@ -787,6 +838,9 @@ static int report_step(Smpc *s)
 		}
 
 		case OP_REPEAT:
+			/* Push: the frame index is the depth as it stands, and the
+			 * depth then points one past the top frame for as long as the
+			 * body is running. */
 			if (s->jr.loop_depth < SMPC_LOOP_FRAMES)
 				s->jr.loop_start[s->jr.loop_depth] = (uint16_t)(s->jr.pc + 1);
 			s->jr.loop_depth++;
@@ -794,14 +848,37 @@ static int report_step(Smpc *s)
 			break;
 
 		case OP_ENDREPEAT:
-			/* arg selects which counter drives this loop. */
-			if (s->jr.ctr[arg] < s->jr.ctr_max[arg]) {
+			/* arg selects which counter drives this loop.
+			 *
+			 * The test is `ctr + 1 < max`, not `ctr < max`, because this
+			 * is a do-while: the body has already run once by the time
+			 * control reaches here, and `ctr` starts at zero.  With a
+			 * plain `ctr < max` a loop bounded by N runs N+1 times, which
+			 * gave the port loop three passes over two ports and the
+			 * sub-slot loop an extra empty slot behind every pad.
+			 *
+			 * Loops whose body increments the counter itself (the data
+			 * loops used to, via STORE/LOAD) would then run short, which
+			 * is why nothing inside a loop body touches its counter any
+			 * more: the index for those loops is the counter, and the
+			 * increment belongs here and here only. */
+			if ((uint32_t)s->jr.ctr[arg] + 1u < (uint32_t)s->jr.ctr_max[arg]) {
+				/* Still inside: peek at the top frame, do not pop it.
+				 * Popping here left the depth one short of the frame it
+				 * belonged to, so the next REPEAT overwrote the outer
+				 * loop's start address and the port loop then jumped back
+				 * into the sub-slot body instead of into the port loop.
+				 * The report ran port 0 twice and never reached port 1. */
 				s->jr.ctr[arg]++;
 				if (s->jr.loop_depth > 0)
-					s->jr.loop_depth--;
-				s->jr.pc = s->jr.loop_start[s->jr.loop_depth];
+					s->jr.pc = s->jr.loop_start[s->jr.loop_depth - 1];
+				else
+					s->jr.pc++;
 			} else {
+				/* Finished: pop. */
 				s->jr.ctr[arg] = 0;
+				if (s->jr.loop_depth > 0)
+					s->jr.loop_depth--;
 				s->jr.pc++;
 			}
 			break;
@@ -816,7 +893,15 @@ static int report_step(Smpc *s)
 			unsigned v;
 
 			switch (src) {
-			case CTRMAX_ID2:    v = (unsigned)(s->jr.id2 & 0x0F); break;
+			case CTRMAX_ID2:
+				/* Beetle's ReadCount: ((id2 & 0xF0) == 0xF0) ? 0 :
+				 * (id2 & 0xF).  The all-ones id an empty sub-slot
+				 * answers with therefore means *no* payload; taking
+				 * the low nybble gave it 15 bytes and ran the report
+				 * three times over the 64-nybble DMA window. */
+				v = ((s->jr.id2 & 0xF0) == 0xF0) ? 0u
+				    : (unsigned)(s->jr.id2 & 0x0F);
+				break;
 			case CTRMAX_IDTAP:  v = (unsigned)(s->jr.id_tap & 0x0F); break;
 			default:           v = SMPC_PORT_COUNT; break;
 			}
@@ -833,6 +918,28 @@ static int report_step(Smpc *s)
 		case OP_IF_PORT_SKIP:
 			if (s->jr.mode[arg & 0x03] & 2)
 				s->jr.pc = (uint16_t)(arg >> 2);
+			else
+				s->jr.pc++;
+			break;
+
+		case OP_IF_CTRMAX_ZERO:
+			/* A do-while runs at least once no matter what the bound
+			 * says, so a loop that may legitimately execute zero times
+			 * -- a tap advertising no pads, a sub-slot with no payload
+			 * -- needs an explicit guard in front of it. */
+			if (s->jr.ctr_max[arg & 0x0F] == 0)
+				s->jr.pc = (uint16_t)(arg >> 8);
+			else
+				s->jr.pc++;
+			break;
+
+		case OP_IF_TAP_LE1:
+			/* Beetle tests `TapCount > 1` before re-reading id2 for a
+			 * sub-slot: a directly-connected pad reports TapCount 1 and
+			 * keeps using the port-level id2.  is_tap alone is not the
+			 * same test -- a tap with a single pad would diverge. */
+			if ((s->jr.id_tap & 0x0F) <= 1)
+				s->jr.pc = arg;
 			else
 				s->jr.pc++;
 			break;
@@ -898,14 +1005,31 @@ static int report_step(Smpc *s)
 			s->jr.id2 = (uint8_t)(((s->jr.work[0] & 0x0F) << 4) |
 			                     (s->jr.work[1] & 0x0F));
 			/* A multi-tap identifies itself with a 0x4x header; the
-			 * low nybble is the number of attached pads. */
+			 * low nybble is the number of attached pads.  Only the
+			 * port-level read may do this: the sub-slot loop re-reads
+			 * id2, a sub-pad answers 0x1x, and clearing is_tap there
+			 * made `IF_NOT_MULTI` skip the probe from the second slot
+			 * on, dropping the report a byte out of step with the
+			 * adapter's stream. */
 			s->jr.is_tap = ((s->jr.id2 & 0xF0) == 0x40);
 			s->jr.pc++;
 			break;
 
+		case OP_SET_ID2_TAP:
+			s->jr.id2 = (uint8_t)(((s->jr.work[0] & 0x0F) << 4) |
+			                     (s->jr.work[1] & 0x0F));
+			s->jr.pc++;
+			break;
+
 		case OP_SET_IDTAP:
+			/* work[2], not work[3]: the count is sampled with TL still
+			 * low, which is the *high* nybble of the adapter's count
+			 * byte -- the slot BlueRetro puts `nb_port << 4` in.  work[3]
+			 * is the low nybble and is always zero, so the count came
+			 * out as 0 and the sub-slot loop ran exactly once instead of
+			 * once per attached pad. */
 			s->jr.id_tap = (uint8_t)(((s->jr.id2 & 0x0F) << 4) |
-			                         (s->jr.work[3] & 0x0F));
+			                         (s->jr.work[2] & 0x0F));
 			s->jr.pc++;
 			break;
 
@@ -924,13 +1048,20 @@ static int report_step(Smpc *s)
 		case OP_STORE_DATABYTE:
 			s->jr.read_buffer[s->jr.ctr[CTR_DATA]] =
 				(uint8_t)(((s->jr.work[0] & 0x0F) << 4) | (s->jr.work[1] & 0x0F));
-			s->jr.ctr[CTR_DATA]++;
 			s->jr.pc++;
 			break;
 
 		case OP_LOAD_DATABYTE:
-			s->jr.work[0] = s->jr.read_buffer[s->jr.ctr[CTR_DATA]];
-			s->jr.ctr[CTR_DATA]++;
+			/* Both halves, not just the high one: the emitter writes
+			 * work[0] then work[1], so leaving work[1] holding whatever
+			 * the last bus sample put there made every second nybble of
+			 * every reported data byte come from the id probe. */
+			{
+				const uint8_t b = s->jr.read_buffer[s->jr.ctr[CTR_DATA]];
+
+				s->jr.work[0] = (uint8_t)(b >> 4);
+				s->jr.work[1] = (uint8_t)(b & 0x0F);
+			}
 			s->jr.pc++;
 			break;
 
@@ -1074,6 +1205,24 @@ static uint16_t emit_if_ctr_nonzero(Smpc *s, int ctr)
 	return at;
 }
 
+/* Guards a loop whose bound may be zero. */
+static uint16_t emit_if_ctrmax_zero(Smpc *s, int ctr)
+{
+	const uint16_t at = (uint16_t)s->jr.prog_len;
+
+	emit(s, OP_IF_CTRMAX_ZERO, (uint16_t)(ctr & 0x0F));
+	return at;
+}
+
+/* Guards the sub-slot id probe: runs only for a tap with 2+ pads. */
+static uint16_t emit_if_tap_le1(Smpc *s)
+{
+	const uint16_t at = (uint16_t)s->jr.prog_len;
+
+	emit(s, OP_IF_TAP_LE1, 0);
+	return at;
+}
+
 /* IF_ID1 packs expected in bits 0-3 and the else-target in bits 4-15. */
 static void patch_if_id1(Smpc *s, uint16_t at, uint16_t target)
 {
@@ -1116,8 +1265,9 @@ static void patch_if_ctr(Smpc *s, uint16_t at, uint16_t target)
  */
 static void build_report_program(Smpc *s)
 {
-	uint16_t if_digital, if3, if5, goto_end;
+	uint16_t if_digital, if3, if5, goto_raw, goto_digital;
 	uint16_t skip_port, skip_not_tap, skip_tap, skip_not_multi, skip_not_first;
+	uint16_t skip_empty_tap, skip_empty_data;
 
 	s->jr.prog_len = 0;
 	s->jr.pc = 0;
@@ -1146,15 +1296,28 @@ static void build_report_program(Smpc *s)
 	emit_2nibble_sample(s, 0, 1);
 	emit(s, OP_SET_ID1, 0);
 
-	/* ---- dispatch ---- */
+	/* ---- dispatch ----
+	 *
+	 * The arms are a forward chain: the unmatched arm is emitted first,
+	 * then each recognised one, so every arm except the last has to jump
+	 * past the ones behind it.  Patching those jumps to "the instruction
+	 * after this arm" lands them on the *next* arm instead of on the port
+	 * tail, which made an unmatched id run the raw-id arm and then the
+	 * self-clocking one as well -- two reports back to back, long enough
+	 * to wrap the 64-nybble write pointer and hand the host a second
+	 * block-boundary interrupt. */
 	if_digital = emit_if_id1(s, 0xB);
 	if3 = emit_if_id1(s, 0x3);
 	if5 = emit_if_id1(s, 0x5);
 
-	/* Unrecognised: report the raw id nybble and a zero size. */
-	emit_nyb_eat(s, pack_nyb(SRC_REG_HI, 0));
+	/* Unrecognised: report the raw id nybble and a zero size.  Beetle
+	 * writes `JRS.ID1` itself into one nybble slot, which takes its low
+	 * half; the high half of a one-nybble id is always zero and turned
+	 * an empty port's 0xF into 0x0, so the terminator byte came out as
+	 * 00 instead of F0. */
+	emit_nyb_eat(s, pack_nyb(SRC_REG_LO, 0));
 	emit_nyb_eat(s, pack_nyb(SRC_CONST, 0x0));
-	goto_end = emit_goto_here(s);
+	goto_raw = emit_goto_here(s);
 
 	/* ---- first-generation digital pad ----
 	 * No packet protocol: the pad answers the id probe with its own
@@ -1180,11 +1343,13 @@ static void build_report_program(Smpc *s)
 	emit_nyb_eat(s, pack_nyb(SRC_WORK, 2));
 	emit_nyb_eat(s, pack_nyb(SRC_WORK, 3));
 	emit_nyb_eat(s, pack_nyb(SRC_WORK_OR7, 0));
-	patch_goto(s, goto_end, (uint16_t)s->jr.prog_len);
+	/* Both jumps are patched once the port tail exists, below. */
+	goto_digital = emit_goto_here(s);
 
 	/* ---- self-clocking devices ----
 	 * The device negotiates: the SMPC reads its id and data size, then
-	 * streams that many bytes. */
+	 * streams that many bytes.  Patched after the jump above so that the
+	 * two id1 tests land on the arm's first instruction, not on the jump. */
 	patch_if_id1(s, if3, (uint16_t)s->jr.prog_len);
 	patch_if_id1(s, if5, (uint16_t)s->jr.prog_len);
 
@@ -1214,12 +1379,14 @@ static void build_report_program(Smpc *s)
 	emit(s, OP_SET_CTRMAX, (uint16_t)(CTR_TAP | (CTRMAX_IDTAP << 2) | (1 << 4)));
 	patch_if(s, skip_tap, (uint16_t)s->jr.prog_len);
 
+	skip_empty_tap = emit_if_ctrmax_zero(s, CTR_TAP);
 	emit(s, OP_REPEAT, 0);
 
-	/* Behind a multi-tap, each sub-device has its own id and size. */
-	skip_not_multi = emit_if_not_multi(s);
+	/* Behind a multi-tap, each sub-device has its own id and size.
+	 * Beetle guards this with `TapCount > 1`, not with is_tap. */
+	skip_not_multi = emit_if_tap_le1(s);
 	emit_2nibble_read(s, 0, 1);
-	emit(s, OP_SET_ID2, 0);
+	emit(s, OP_SET_ID2_TAP, 0);
 	emit(s, OP_SET_CTRMAX, (uint16_t)(CTR_DATA | (CTRMAX_ID2 << 2)));
 	patch_if(s, skip_not_multi, (uint16_t)s->jr.prog_len);
 
@@ -1232,6 +1399,10 @@ static void build_report_program(Smpc *s)
 	emit_nyb_eat(s, pack_nyb(SRC_REG_HI, 1));	/* id2 high     */
 	emit_nyb_eat(s, pack_nyb(SRC_REG_LO, 1));	/* id2 low      */
 
+	/* Both data loops are covered by one guard: an empty sub-slot
+	 * reports a payload of zero, and the do-while would otherwise
+	 * still emit a byte it never received. */
+	skip_empty_data = emit_if_ctrmax_zero(s, CTR_DATA);
 	emit(s, OP_REPEAT, 0);
 	emit_2nibble_read(s, 0, 1);
 	emit(s, OP_STORE_DATABYTE, 0);
@@ -1242,10 +1413,17 @@ static void build_report_program(Smpc *s)
 	emit_nyb_eat(s, pack_nyb(SRC_WORK, 0));
 	emit_nyb_eat(s, pack_nyb(SRC_WORK, 1));
 	emit(s, OP_ENDREPEAT, CTR_DATA);
+	patch_if_ctr(s, skip_empty_data, (uint16_t)s->jr.prog_len);
 
 	emit(s, OP_ENDREPEAT, CTR_TAP);
+	patch_if_ctr(s, skip_empty_tap, (uint16_t)s->jr.prog_len);
 
-	/* ---- end of port ---- */
+	/* ---- end of port ----
+	 * Every arm arrives here, including the two that jumped over the arms
+	 * behind them.  The tail is shared because the port has to be released
+	 * and advanced exactly once whichever arm ran. */
+	patch_goto(s, goto_raw, (uint16_t)s->jr.prog_len);
+	patch_goto(s, goto_digital, (uint16_t)s->jr.prog_len);
 	emit_eat(s, EAT_PORT_TAIL);
 	emit_set(s, -1, -1);
 
@@ -1254,6 +1432,25 @@ static void build_report_program(Smpc *s)
 	emit(s, OP_NEXT_PORT, 0);
 	emit(s, OP_ENDREPEAT, CTR_PORT);
 	emit(s, OP_END, 0);
+
+/* temporary diagnostic, appended inside build_report_program */
+	if (getenv("SMPC_PROG")) {
+		static const char *const nm[] = {
+			"END","EAT","SETTHTR","SAMPLE","WAIT_TL","NYB","REPEAT",
+			"ENDREPEAT","GOTO","SET_CTRMAX","IF_PORT_SKIP","IF_ID1",
+			"IF_TAP","IF_CTR_NONZERO","SET_ID1","SET_ID2","SET_ID2_TAP",
+			"SET_IDTAP","SET_IDTAP_DIRECT","FORCE_MOUSE_ID","STORE_DATABYTE",
+			"LOAD_DATABYTE","NEXT_PORT","IF_MULTI","IF_NOT_MULTI",
+			"IF_CTRMAX_ZERO","IF_TAP_LE1"
+		};
+		fprintf(stderr, "--- report program, %u ops\n", s->jr.prog_len);
+		for (uint32_t i = 0; i < s->jr.prog_len; i++) {
+			const SmpcOp o = s->jr.prog[i];
+			fprintf(stderr, "  %3u  %-16s %u\n", i,
+			        o.op < sizeof nm / sizeof nm[0] ? nm[o.op] : "?",
+			        o.arg);
+		}
+	}
 }
 
 /* ------------------------------------------------------------------ */
@@ -1367,10 +1564,6 @@ static void exec_simple(Smpc *s, int cmd)
 		s->cd_on = false;
 		break;
 
-	case SMPC_CMD_SYSRES:
-		s->reset_pending = true;
-		break;
-
 	case SMPC_CMD_NMIREQ:
 		raise_master_nmi(s);
 		break;
@@ -1431,6 +1624,7 @@ enum
 	ST_SETTIME_WAIT,
 	ST_SETSMEM_WAIT,
 	ST_CKCHG_WAIT,
+	ST_SYSRES_WAIT,
 	ST_INTBACK_STATUS_WAIT,
 	ST_INTBACK_STATUS_DONE,
 	ST_INTBACK_ACK_B,
@@ -1521,9 +1715,15 @@ static void do_vblank_housekeeping(Smpc *s)
 		s->reset_button_count = 0;
 	}
 
-	while (s->rtc_clock_accum >= (uint64_t)SMPC_CLOCK_HZ) {
+	/* rtc_clock_accum is fed the same 32.32 fixed-point `clocks` value as
+	 * clock_counter, so the one-second threshold has to carry the << 32
+	 * too.  Without it the drain loop runs 4 294 967 296 times per RTC
+	 * second, and the first vblank housekeeping after a long stretch with
+	 * no housekeeping -- the seven frames of a clock change, where
+	 * ST_CKCHG_WAIT consumes pending_vb itself -- never returns. */
+	while (s->rtc_clock_accum >= ((uint64_t)SMPC_CLOCK_HZ << 32)) {
 		rtc_inc_second((SmpcRtc *)&s->rtc_raw[0]);
-		s->rtc_clock_accum -= SMPC_CLOCK_HZ;
+		s->rtc_clock_accum -= (uint64_t)SMPC_CLOCK_HZ << 32;
 	}
 }
 
@@ -1649,12 +1849,24 @@ int32_t smpc_run(Smpc *s, int32_t ts)
 				breakout = true;
 				break;
 
-			default:
-				exec_simple(s, s->executing_command);
-				s->phase = ST_DONE;
-				break;
-			}
-			break;
+	case SMPC_CMD_SYSRES:
+		/* The command does not retire when it is accepted; it retires at
+		 * the frame boundary, when the reset is actually applied.  SF
+		 * therefore stays set across the whole wait, and software that
+		 * polls SF instead of waiting a frame sees the command still in
+		 * flight -- Beetle times the BIOS's poll out for exactly that
+		 * reason. */
+		s->reset_pending = true;
+		s->phase = ST_SYSRES_WAIT;
+		breakout = true;
+		break;
+
+	default:
+		exec_simple(s, s->executing_command);
+		s->phase = ST_DONE;
+		break;
+	}
+	break;
 
 		case ST_SETTIME_WAIT:
 			EAT_THEN(ST_SETTIME_WAIT, EAT_SETTIME);
@@ -1682,16 +1894,34 @@ int32_t smpc_run(Smpc *s, int32_t ts)
 				s->jr.ckchg_vb++;
 				if (s->jr.ckchg_vb == 3) {
 					/* The new clock takes effect at the frame boundary,
-					 * not the instant the command completes. */
-					s->current_clock_divisor = s->pending_clock_divisor;
-					s->pending_clock_divisor = 0;
-					s->clock_ratio =
-						(((int64_t)1 << 32) * SMPC_CLOCK_HZ *
-						 s->current_clock_divisor) / s->master_clock;
+					 * not the instant the command completes.  This is the
+					 * only place pending_clock_divisor is consumed: it has
+					 * a single owner, because an earlier consumer left
+					 * current_clock_divisor reading 0 and clock_ratio with
+					 * it, which the sleep calculation then divided by. */
+					if (s->pending_clock_divisor > 0) {
+						s->current_clock_divisor = s->pending_clock_divisor;
+						s->pending_clock_divisor = 0;
+						s->clock_ratio =
+							(((int64_t)1 << 32) * SMPC_CLOCK_HZ *
+							 s->current_clock_divisor) / s->master_clock;
+					}
 				} else if (s->jr.ckchg_vb >= 7) {
 					raise_master_nmi(s);
 					s->phase = ST_DONE;
 				}
+				break;
+			}
+			next_ts = ts + POLL_COND;
+			breakout = true;
+			break;
+
+		case ST_SYSRES_WAIT:
+			/* Held here, not retired: smpc_start_frame() applies the
+			 * reset and clears reset_pending, which is what lets SF
+			 * fall.  Until then the host's SF poll keeps spinning. */
+			if (!s->reset_pending) {
+				s->phase = ST_DONE;
 				break;
 			}
 			next_ts = ts + POLL_COND;
@@ -2009,20 +2239,30 @@ void smpc_start_frame(Smpc *s)
 	if (s->reset_pending) {
 		/* The system performs the reset at the frame boundary, not the
 		 * SMPC; OREG31 keeps reporting SYSRES so the host can tell the
-		 * command completed. */
+		 * command completed.  The reset is a real one, so it takes the
+		 * SMPC-visible state with it as well: a command written in the
+		 * window between the SYSRES being issued and the boundary is
+		 * dropped (Beetle's SS_Reset reaches SMPC_Reset, which zeroes
+		 * PendingCommand, OREG and BusBuffer), and an SF read afterwards
+		 * must come back as 0 rather than echoing the last COMREG byte. */
 		if (s->env.vdp_reset)
 			s->env.vdp_reset(s->env.ctx);
-		if (s->env.scu_reset)
-			s->env.scu_reset(s->env.ctx);
+		if (s->env.sound_reset)
+			s->env.sound_reset(s->env.ctx);
 		s->reset_pending = false;
+		s->pending_command = -1;
+		memset(s->oreg, 0, sizeof(s->oreg));
+		s->bus_buffer = 0;
+		s->sf = false;
 		s->oreg[0x1F] = SMPC_CMD_SYSRES;
 	}
 
-	if (s->pending_clock_divisor > 0) {
-		s->current_clock_divisor = s->pending_clock_divisor;
-		s->pending_clock_divisor = 0;
-	}
-
+	/* pending_clock_divisor is deliberately NOT applied here.  It belongs
+	 * to the CKCHG state machine in smpc_run(), which applies it at its
+	 * third vblank; taking it here as well consumed it before that branch
+	 * ran, left current_clock_divisor at 0 and clock_ratio with it, and the
+	 * idle-path sleep calculation divided by zero.  Recomputing the ratio
+	 * from the current divisor is still correct either way. */
 	s->clock_ratio = (((int64_t)1 << 32) * SMPC_CLOCK_HZ * s->current_clock_divisor) /
 	                  s->master_clock;
 }
@@ -2201,13 +2441,23 @@ void smpc_set_multitap(Smpc *s, unsigned port, bool enabled)
 	p->tap_enabled = enabled;
 
 	/* A multi-tap takes over the port and is handed the next virtual pads
-	 * as its sub-connectors.  The sub-slot pointers are the only ones
-	 * that have to be refreshed here; the port's own device is reached
-	 * through s->devices[port] and cannot go stale. */
+	 * as its sub-connectors.  Beetle's MapPorts() walks a single cursor
+	 * over VirtualPorts: the tap on port 0 consumes slots 0..5, so sub 0
+	 * is the pad configured for input port 0 -- not input port 1.  The
+	 * old `port + 1 + i` skipped it, so every sub-slot reported the pad
+	 * one place to its right and the third came back empty.
+	 *
+	 * The cursor also matters for the *other* physical port: once the
+	 * tap has consumed 0..5 there is no slot 6, so port 1 answers as if
+	 * nothing were plugged in, exactly as Beetle's NULL VirtualPorts[6]
+	 * does.  That is handled by port_device_index() below. */
 	if (enabled) {
-		for (unsigned i = 0; i < 6; i++)
+		for (unsigned i = 0; i < 6; i++) {
+			const unsigned idx = port + i;
+
 			smpc_multitap_set_sub(p->tap, i,
-			                      s->devices[(port + 1 + i) % 6]);
+			                      idx < 6 ? s->devices[idx] : NULL);
+		}
 	}
 	update_io_bus(s, port);
 }

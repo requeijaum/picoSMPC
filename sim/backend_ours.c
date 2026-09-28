@@ -125,15 +125,30 @@ static void be_set_input(unsigned port, const char *type, uint8_t *ptr)
 	} else if (!strcmp(type, "gun")) {
 		smpc_set_peripheral(&g_smpc, port, SMPC_DEV_GUN);
 	}
-	if (ptr)
-		smpc_update_input(&g_smpc, port, ptr);
 	remap(port);
 }
 
 static void be_set_multitap(unsigned sp, bool en) { smpc_set_multitap(&g_smpc, sp, en); }
 static void be_set_rtc(const struct tm *ht, uint8_t lang) { smpc_set_rtc(&g_smpc, ht, lang); }
 static void be_transform_input(void) { }
-static void be_update_input(int32_t el) { (void)el; }
+
+/*
+ * Deliberately *not* done from be_set_input.
+ *
+ * Beetle's SMPC_SetInput only stores the pointer; the device sees its input
+ * when SMPC_UpdateInput runs.  Loading ours eagerly meant the two backends
+ * sampled their stimulus at different points -- ours on set_input, Beetle's
+ * on update_input -- so for the scenarios that never call update_input they
+ * were being tested against different inputs.  Loading here keeps the
+ * stimulus identical, which is the whole point of having one testbench.
+ */
+static void be_update_input(int32_t el)
+{
+	(void)el;
+	for (unsigned port = 0; port < MAX_PORTS; port++)
+		if (g_input[port])
+			smpc_update_input(&g_smpc, port, g_input[port]);
+}
 static void be_update_output(void) { }
 static void be_reset_ts(void) { }
 static void be_poll_system(void) { smpc_poll_system(&g_smpc); }

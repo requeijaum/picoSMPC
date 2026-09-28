@@ -14,30 +14,47 @@ accept a USB HID controller in place of a physical one.
 |---|---|
 | 0 — references, timing baseline | done |
 | 1 — portable core skeleton + golden-model harness | done |
-| 2 — command engine, INTBACK, RTC/SMEM | command engine, status report, SETTIME, SETSMEM, area code, reset debounce all match; the peripheral-report path is unfinished |
-| 3 — pad protocol, multi-tap, virtual device | the self-clocking device path matches; the first-generation digital-pad path, the mouse and multi-tap do not yet |
+| 2 — command engine, INTBACK, RTC/SMEM | done — command engine, status report, SETTIME, SETSMEM, area code, reset debounce and the peripheral-report path all match |
+| 3 — pad protocol, multi-tap, virtual device | done — digital pad, 3D pad in both modes, mouse, and the multi-tap all match the hardware-derived expectations |
 | 4 — RP2350B firmware (PIO, timebase) | not started |
 | 5 — RTC/NVRAM/STE on hardware | not started |
 | 6 — hardware | not started |
 
-`sim/differ.sh` reports the current state. It compares our core against
-Mednafen's SMPC, which is compiled unmodified as a library — see
-`reference/beetle/README.md`.
+`sim/differ.sh` reports the current state, in two columns:
 
-**2 of 9 scenarios pass.**  The peripheral-report path now runs to completion
-and pulses its interrupts correctly, but the bytes it writes are still wrong.
-Four real defects were fixed along the way — all found by reading other
-implementations, not by the harness: The failures are not all the same kind, and it is
-worth being precise about which is which rather than reading the count:
+- **HARDWARE** — `sim/traces/<sc>.expect`, derived by `sim/gen_expect.py`
+  from the BlueRetro controller-port driver and the SMPC's own report
+  framing. Authoritative: a mismatch fails the run.
+- **BEETLE** — `sim/traces/<sc>.beetle`, a recorded run of Mednafen's SMPC
+  compiled unmodified as a library (see `reference/beetle/README.md`).
+  A reference, not an oracle: Beetle has known disagreements with the
+  hardware reference, so a mismatch here is reported as `INFO` and never
+  fails.
 
-| Scenario | Divergence | Assessment |
-|---|---|---|
-| `settime_smem` | one bit of the SF open-bus read (`0x80` vs `0x10`) | every register byte, SR and every side effect match; the difference is which value last sat on the bus, so it is most likely a harness artifact of the INTBACK continue handshake, not a model difference — unconfirmed |
-| `intback_one_pad`, `intback_analog` | the report is cut short after two nybbles | real gap in the report engine |
-| `intback_mouse` | ID1 decode: 0x03 instead of 0xE3 | real gap in the mouse's id-nybble de-scrambling |
-| `intback_multitap` | the adapter header is read as a device id, then the sub-slot loop stalls | real gap in the multi-tap path |
-| `direct_mode` | the final INTBACK produces no report | real gap, same as the above |
-| `sysres_ckchg` | the scenario itself is broken (it drives the virtual clock backwards); both models fail it the same way, which is a harness bug, not a model one |
+SF is compared in neither column. Bits 7..1 are open-bus — they read back
+whatever the SH-2 last put on the data bus — and bit 0 is exercised
+functionally by every poll in `sim/tb.c`, so a dump would only record which
+of the two host interaction sequences happened to run.
+
+**11 of 11 scenarios pass the hardware column; 10 of 11 match Beetle.**
+
+| Scenario | State |
+|---|---|
+| `status_only`, `command_matrix`, `sysres_ckchg`, `settime_smem` | byte-identical on both columns |
+| `intback_one_pad`, `intback_analog`, `intback_digital_buttons`, `intback_multitap`, `intback_multitap_p1`, `direct_mode` | byte-identical on both columns |
+| `intback_mouse` | passes the hardware column; `INFO` against Beetle on the payload bytes |
+
+The one Beetle divergence is the documented mouse payload-length
+disagreement: BlueRetro sends four payload bytes for a standalone mouse
+(`sega_io.c:308-321`) and only a mouse behind a multi-tap uses `0xE3`
+(`sega_io.c:379`), while Beetle force-substitutes `0xE3` and reads three
+bytes for both (`beetle/smpc.c:1525-1526`). `sim/gen_expect.py` marks those
+bytes `--` rather than picking a side; the reasoning is in
+`docs/controller-port.md`.
+
+### Defects found so far
+
+Read from other implementations, not guessed at. The list is cumulative:
 
 - a use-after-free: a port cached a device pointer that `smpc_set_peripheral`
   then freed
@@ -46,25 +63,65 @@ worth being precise about which is which rather than reading the count:
 - three multi-tap guards with their sense inverted, so a directly-connected
   pad's id and size were overwritten with `0xFF` and its data length became 15
 - the front-panel port loop had no trip count, so it ran exactly once
+- `OP_ENDREPEAT` popped its loop frame on the branch that jumps *back* and
+  kept it on the branch that exits, so nested loops overwrote the outer
+  loop's start address — the report ran port 0 twice and never reached port 1
+- the multi-tap's count nybble was sampled with TL high instead of TL low,
+  which is always zero, so the sub-slot loop ran once instead of once per pad
+- `OP_SET_ID2` recomputed `is_tap`, so the sub-slot id read cleared the flag
+  and from the second slot on the report fell a byte out of step with the
+  adapter's stream
+- `smpc_set_multitap` wired sub-slot *i* to `devices[port + 1 + i]`, skipping
+  port 0's own pad; Beetle's `MapPorts` walks a cursor that includes it
+- `ReadCount` took the low nybble of an all-ones `id2`, turning "no payload"
+  into fifteen bytes and running the report three times over the 64-nybble
+  DMA window
+- the report's loops are do-whiles, so a zero bound still ran once; the two
+  loops that can legitimately be empty (a tap with no pads, a sub-slot with
+  no payload) needed an explicit guard in front of them
+- `skip_empty_tap`'s guard was patched with `patch_if`, which overwrites the
+  whole argument; `OP_IF_CTRMAX_ZERO` packs its counter into bits 0-3 and its
+  target into bits 8-15, so the op read `ctr_max[15]` — out of bounds on a
+  four-entry array — and, when that garbage happened to be zero, set `pc` to
+  `arg >> 8`, which is 0, and looped the report from the start forever. It
+  passed by luck: the out-of-bounds read had to come back non-zero, and only
+  the port order decided that
+- `smpc_iodev_update_input` had no `case SMPC_DEV_GAMEPAD`, so a
+  first-generation pad's button state was never loaded and it reported every
+  button released whatever the host set
+- `digital_bus` put the button nybble on the wire without inverting it. The
+  four data lines are active low — `threedpad_load_buffer` already applies
+  `^ 0xF` — so a plain gamepad read as the exact complement of its buttons.
+  Beetle folds the inversion into `UpdateInput` instead (`smpc_iodevice.c:201`)
+  and additionally masks bits 12 and 13 out of the inverted word; since
+  `~x & ~m` is `~(x | m)`, that is the same as forcing those two bits here
+- `nyb_source` read the nybble descriptor's argument with a 3-bit mask, but
+  `pack_nyb` packs a constant in four bits, so `emit_nyb_const(s, 0xF)` — the
+  `F` of the `F1 02` report header — silently became `0x7` and the `id1 == 0xB`
+  branch reported `0x71` as its header. That branch is the generation that does
+  not negotiate, and nothing but a plain gamepad ever reached it, so no
+  scenario caught it
 
-So: the command engine, the status report and the report sequencer's control
-flow are solid; the bytes the sequencer produces in the self-clocking block
-are not yet right. That is debugging inside a design that is in place, not
-missing design.
+The last three were found by one scenario, `intback_gamepad`, and they are
+worth reading as a sequence: fixing the first two left the report still wrong,
+because the third was hiding behind the `0x7` header. It stays out of both
+columns — `sega_saturn_task` sends `DEV_SATURN_DIGITAL` to `default: BADTYPE`
+(`sega_io.c:845-846`, `:883-884`), so BlueRetro never serves a standalone
+Saturn Digital Gamepad and nothing in this tree can derive its report.
+Recording Beetle's bytes would have made the authoritative column a copy of
+the reference one. Its trace is recorded at
+`sim/traces/intback_gamepad.beetle` and matches byte for byte:
 
-The remaining divergence is narrow and reproducible: dump the OREG nybble
-writes with `./build/tb` under a debug build and compare against the expected
-`F1 02 FF FF F0`. The `id_tap` pair should be `0xF1` and is coming out as
-`0x05`, which means `OP_SET_IDTAP_DIRECT` is not taking effect where the
-program expects it. Everything before and after that point in the exchange is
-byte-correct.
+```sh
+./build/tb ours intback_gamepad
+```
 
 ## Build and test
 
 ```sh
 ./sim/build.sh          # needs BEETLE_ROOT, see below
 ./sim/differ.sh         # all scenarios
-./sim/differ.sh -v      # with diffs
+DIFF_VERBOSE=1 ./sim/differ.sh   # with diffs
 ./build/tb ours         # our core only, all scenarios
 ./build/tb beetle       # the golden model only
 ```

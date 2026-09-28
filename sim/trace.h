@@ -71,4 +71,11 @@ void trace_clock(int32_t ts);
 
 int  trace_write(FILE *f);
 
+/*
+ * The same log in a form a script can parse: no timestamps, and registers
+ * broken out as `REG <name> <bytes...>` rather than being indistinguishable
+ * from an event line.  differ.sh reads this; trace_write() is for a human.
+ */
+int  trace_write_canonical(FILE *f);
+
 #endif

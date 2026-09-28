@@ -20,7 +20,8 @@ struct SmpcIoDev
 	bool        powered;
 
 	/* --- 3D Control Pad (also the Saturn Control Pad in digital mode) --- */
-	uint16_t dbuttons;		/* active low, low 12 bits */
+	uint16_t dbuttons;		/* active high: bit set == pressed        */
+	bool     mode;			/* analog (3D) mode, from button bit 12   */
 	uint8_t  thumb[2];
 	uint8_t  shoulder[2];
 	uint8_t  pad_buffer[16];
@@ -75,6 +76,8 @@ void smpc_iodev_power(SmpcIoDev *d)
 		d->phase = -1;
 		d->tl = true;
 		d->data_out = 0x01;
+		d->dbuttons = 0;
+		d->mode = false;
 		break;
 	case SMPC_DEV_MOUSE:
 		d->phase = -1;
@@ -105,7 +108,7 @@ void smpc_iodev_power(SmpcIoDev *d)
  *
  * Layouts match what the frontend supplies, which is also what Ymir and
  * Mednafen consume:
- *   offset 0x00  2 bytes  digital/analog buttons (active low)
+ *   offset 0x00  2 bytes  buttons (active high) with bit 12 = analog mode
  *   offset 0x02  4 bytes  thumb X, 16-bit signed, 0x8000 == centre
  *   offset 0x04  4 bytes  thumb Y
  *   offset 0x06  4 bytes  shoulder L
@@ -114,7 +117,10 @@ void smpc_iodev_power(SmpcIoDev *d)
  * --------------------------------------------------------------------- */
 static uint8_t scale_axis(int32_t v)
 {
-	/* Snap the dead centre, then map 0..65535 onto 0..255. */
+	/* The axis is an *unsigned* 16-bit travel with 0x8000 at centre, not a
+	 * signed one: 0x0000 and 0xFFFF are the two ends of travel, so casting
+	 * through int16_t maps 0xFFFF to 0 instead of 255 and puts one end of
+	 * every stick at the wrong place. */
 	if (v >= 32768 - 128 && v < 32768)
 		v = 32768;
 	return (uint8_t)((v * 255 + 32767) / 65535);
@@ -128,23 +134,44 @@ void smpc_iodev_update_input(SmpcIoDev *d, const uint8_t *data, int32_t time_ela
 	case SMPC_DEV_3DPAD: {
 		const uint16_t dtmp = (uint16_t)(data[0] | (data[1] << 8));
 		d->dbuttons = (uint16_t)((d->dbuttons & 0x8800) | (dtmp & 0x0FFF));
-		if (dtmp & 0x1000)
-			d->dbuttons |= 0x8000;	/* analog mode flag */
+		/* Bit 12 selects analog mode.  It must not be parked in dbuttons:
+		 * bit 15 there is the right trigger's digital bit, and dbuttons
+		 * never carries bit 12 across the mask above, so the analog
+		 * report was unreachable.  Model it separately, as Beetle does. */
+		d->mode = (dtmp & 0x1000) != 0;
 		for (int axis = 0; axis < 2; axis++) {
 			const int off = 0x2 + (axis << 1);
-			const int32_t raw = (int16_t)(uint16_t)(data[off] | (data[off + 1] << 8));
+			const int32_t raw = (uint16_t)(data[off] | (data[off + 1] << 8));
 			d->thumb[axis] = scale_axis(raw);
 		}
 		for (int w = 0; w < 2; w++) {
 			const int off = 0x6 + (w << 1);
-			d->shoulder[w] = scale_axis((int16_t)(uint16_t)(data[off] | (data[off + 1] << 8)));
+			d->shoulder[w] = scale_axis((uint16_t)(data[off] | (data[off + 1] << 8)));
 			/* Measured hysteresis: engage by 0x8E, release by 0x55.
-			 * Without the gap the digital L/R bits chatter. */
+			 * Without the gap the digital L/R bits chatter.  The
+			 * shoulder doubles as a digital button -- L at bit 11,
+			 * R at bit 15 -- so an analog-mode pad reports each
+			 * trigger twice, once as an axis and once in the button
+			 * bytes; the second button byte's low nybble is where
+			 * that shows up. */
 			if (d->shoulder[w] <= 0x55)
 				d->dbuttons &= (uint16_t)~(0x0800 << (w << 2));
 			else if (d->shoulder[w] >= 0x8E)
 				d->dbuttons |= (uint16_t)(0x0800 << (w << 2));
 		}
+		break;
+	}
+	case SMPC_DEV_GAMEPAD: {
+		/* A plain Digital Gamepad has no analog mode and no trigger axes,
+		 * so unlike the 3D pad nothing is reserved: the whole word is
+		 * buttons and digital L/R at bits 11 and 15 are ordinary presses.
+		 *
+		 * Bits 12 and 13 are held down unconditionally.  Beetle folds the
+		 * wire inversion in here and then masks those two bits out of the
+		 * inverted word (smpc_iodevice.c:201); `~x & ~m` is `~(x | m)`, so
+		 * forcing them here is the same thing -- on this device those two
+		 * lines never carry a button. */
+		d->dbuttons = (uint16_t)(data[0] | (data[1] << 8) | 0x3000);
 		break;
 	}
 	case SMPC_DEV_MOUSE:
@@ -176,7 +203,7 @@ void smpc_iodev_update_input(SmpcIoDev *d, const uint8_t *data, int32_t time_ela
 
 static void threedpad_load_buffer(SmpcIoDev *d)
 {
-	const bool analog = (d->dbuttons & 0x1000) != 0;
+	const bool analog = d->mode;
 
 	if (analog) {
 		d->pad_buffer[ 0] = 0x1;			/* peripheral type 1 */
@@ -233,8 +260,12 @@ static void tl_protocol_bus(SmpcIoDev *d, uint8_t smpc_out)
 static uint8_t digital_bus(SmpcIoDev *d, uint8_t smpc_out, uint8_t smpc_out_asserted)
 {
 	/* A plain 3-button pad has no packet protocol: it returns a button
-	 * nibble selected by the TH/TR level, with TL held high. */
-	const uint8_t tmp = (uint8_t)((d->dbuttons >> (((smpc_out >> 5) & 3) << 2)) & 0xF);
+	 * nibble selected by the TH/TR level, with TL held high.
+	 *
+	 * The four data lines are active low, so the nibble goes out
+	 * inverted -- threedpad_load_buffer, above, does the same ^ 0xF for
+	 * the packetised pad.  Without it every button reads as pressed. */
+	const uint8_t tmp = (uint8_t)(((d->dbuttons >> (((smpc_out >> 5) & 3) << 2)) & 0xF) ^ 0xF);
 
 	return (uint8_t)(0x10 | (smpc_out & (smpc_out_asserted | 0xE0)) | (tmp & ~smpc_out_asserted));
 }

@@ -1,4 +1,13 @@
+# Build output.
 build/
+*.o
+
+# Third-party trees, fetched by tools/fetch-reference.sh.
+#
+# These are excluded deliberately, not incidentally.  reference/smpc-emulator/
+# contains Sega's SMPC ROM (dump/) and the Saturn Service Manual and the
+# Hitachi HMCS400 handbook (reference_docs/) -- none of which we may
+# redistribute.  reference/bluRetro/ is 3 MB of another project's history when
+# only one file of it is ever read.  See NOTICE.md.
 reference/smpc-emulator/
 reference/bluRetro/
-*.o

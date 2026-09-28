@@ -129,9 +129,6 @@ void tb_write(int32_t ts, uint8_t sh2_addr, uint8_t value)
  * Count System Manager interrupts.  Routed through the shared trace so both
  * backends are counted the same way.
  */
-static uint32_t g_last_irq_count;
-static uint32_t g_irq_seen;
-
 void tb_note_irq(void)
 {
 	g_irq_count++;
@@ -232,12 +229,17 @@ static void setup_common(uint8_t area, int clock_mode, bool digital_pad)
 	memset(g_ports, 0, sizeof g_ports);
 	memset(g_misc, 0, sizeof g_misc);
 
-	/* Digital-mode neutral: 12 digital bits set (released), analog bit
-	 * clear.  The 3D pad maps a 16-bit axis of 0x8000 to 0x80. */
+	/*
+	 * Neutral pad state: no buttons pressed, both thumbsticks centred.
+	 *
+	 * The device models keep buttons active *high* (bit set = pressed) and
+	 * invert them onto the wire, so a released pad is 0 and the report comes
+	 * out as 0xFF.  The thumbsticks are 16-bit signed with 0x8000 at centre.
+	 */
 	for (int i = 0; i < 6; i++) {
-		tb_pad_set_buttons(&g_ports[i][TB_PAD_3DPAD + 0], 0x0FFF);
-		tb_pad_set_buttons(&g_ports[i][TB_PAD_3DPAD + 2], 0x8000);
-		tb_pad_set_buttons(&g_ports[i][TB_PAD_3DPAD + 4], 0x8000);
+		tb_pad_set_buttons(&g_ports[i][TB_PAD_BTN], 0x0000);
+		tb_pad_set_buttons(&g_ports[i][TB_PAD_THUMBX], 0x8000);
+		tb_pad_set_buttons(&g_ports[i][TB_PAD_THUMBY], 0x8000);
 	}
 	(void)digital_pad;
 
@@ -319,12 +321,16 @@ static void sc_intback_analog(void)
 	uint8_t iregs[3] = { 0x01, 0x08, 0xF0 };
 	trace_mark("intback_analog (3dpad analog, all buttons down)");
 	setup_common(0x5, TB_CLOCK_NTSC_352, false);
-	/* dbuttons bit12 set = analog mode; all 12 digital bits clear = pressed */
-	tb_pad_set_buttons(&g_ports[0][TB_PAD_3DPAD + 0], 0x1000);
-	tb_pad_set_buttons(&g_ports[0][TB_PAD_3DPAD + 2], 0x0000);
-	tb_pad_set_buttons(&g_ports[0][TB_PAD_3DPAD + 4], 0xFFFF);
-	tb_pad_set_buttons(&g_ports[0][TB_PAD_3DPAD + 6], 0xFFFF);
-	tb_pad_set_buttons(&g_ports[0][TB_PAD_3DPAD + 8], 0xFFFF);
+	/* Bit 12 selects analog mode; bits 0..11 are the digital buttons, and
+	 * set means pressed -- so 0x1FFF is analog mode with every button down,
+	 * which is what this scenario is named after.  The thumbsticks and
+	 * triggers go to their extremes so the axes are distinguishable from
+	 * centre in the report. */
+	tb_pad_set_buttons(&g_ports[0][TB_PAD_BTN], 0x1FFF);
+	tb_pad_set_buttons(&g_ports[0][TB_PAD_THUMBX], 0x0000);
+	tb_pad_set_buttons(&g_ports[0][TB_PAD_THUMBY], 0xFFFF);
+	tb_pad_set_buttons(&g_ports[0][TB_PAD_SHLDL], 0xFFFF);
+	tb_pad_set_buttons(&g_ports[0][TB_PAD_SHLDR], 0xFFFF);
 	tb_backend->set_input(0, "3dpad", g_ports[0]);
 	tb_backend->set_input(1, "none", g_ports[1]);
 	tb_backend->reset(false);
@@ -355,15 +361,96 @@ static void sc_intback_multitap(void)
 	uint8_t iregs[3] = { 0x01, 0x08, 0xF0 };
 	trace_mark("intback_multitap (3 subs)");
 	setup_common(0x5, TB_CLOCK_NTSC_352, true);
-	/* Three pads behind a multi-tap on port 1, each with a different
-	 * button pattern so the reports can be told apart. */
+	/* Three pads behind a multi-tap on port 0, each with a different
+	 * button pattern so the reports can be told apart.  Bit 12 puts each
+	 * one in analog mode, so each sub-slot carries the full 6-byte packet. */
 	for (int i = 0; i < 3; i++)
-		tb_pad_set_buttons(&g_ports[i][TB_PAD_3DPAD], (uint16_t)(0x1000 | (i + 1)));
+		tb_pad_set_buttons(&g_ports[i][TB_PAD_BTN], (uint16_t)(0x1000 | (i + 1)));
 	tb_backend->set_input(0, "3dpad", g_ports[0]);
 	tb_backend->set_input(1, "3dpad", g_ports[1]);
 	tb_backend->set_input(2, "3dpad", g_ports[2]);
 	tb_backend->set_input(3, "none", g_ports[3]);
 	tb_backend->set_multitap(0, true);
+	tb_backend->reset(false);
+	tb_backend->update_input(1000);
+	intback_exchange(0x10, iregs, 3);
+	tb_advance(200000);
+	dump_regs();
+}
+
+/* ---- scenario 5b: digital mode with an asymmetric button pattern ---- */
+static void sc_intback_digital_buttons(void)
+{
+	uint8_t iregs[3] = { 0x01, 0x08, 0xF0 };
+	trace_mark("intback_digital_buttons (3dpad digital, buttons held)");
+	setup_common(0x5, TB_CLOCK_NTSC_352, false);
+	/* Bit 12 clear means digital mode, so the report is just the Saturn
+	 * Control Pad's two button bytes and nothing else.  The pattern is
+	 * deliberately asymmetric -- 0x0A35 puts a different nybble in every
+	 * one of the four groups -- because the all-released and all-pressed
+	 * patterns are symmetric and so cannot tell whether the report packs
+	 * bits 0..3 into the high nybble or the low one.
+	 *
+	 * The thumbsticks and triggers sit at centre: a shoulder far enough
+	 * from centre sets bit 11 or bit 15 through the hysteresis in
+	 * iodev.c, which would move these bytes behind the scenario's back. */
+	tb_pad_set_buttons(&g_ports[0][TB_PAD_BTN], 0x0A35);
+	tb_pad_set_buttons(&g_ports[0][TB_PAD_THUMBX], 0x8000);
+	tb_pad_set_buttons(&g_ports[0][TB_PAD_THUMBY], 0x8000);
+	tb_pad_set_buttons(&g_ports[0][TB_PAD_SHLDL], 0x8000);
+	tb_pad_set_buttons(&g_ports[0][TB_PAD_SHLDR], 0x8000);
+	tb_backend->set_input(0, "3dpad", g_ports[0]);
+	tb_backend->set_input(1, "none", g_ports[1]);
+	tb_backend->reset(false);
+	tb_backend->update_input(1000);
+	intback_exchange(0x10, iregs, 3);
+	tb_advance(200000);
+	dump_regs();
+}
+
+/* ---- scenario 5c: first-generation digital gamepad ---- */
+static void sc_intback_gamepad(void)
+{
+	uint8_t iregs[3] = { 0x01, 0x08, 0xF0 };
+	trace_mark("intback_gamepad (first-generation pad)");
+	setup_common(0x5, TB_CLOCK_NTSC_352, false);
+	tb_pad_set_buttons(&g_ports[0][TB_PAD_BTN], 0x050A);
+	tb_backend->set_input(0, "gamepad", g_ports[0]);
+	tb_backend->set_input(1, "none", g_ports[1]);
+	tb_backend->reset(false);
+	tb_backend->update_input(1000);
+	intback_exchange(0x10, iregs, 3);
+	tb_advance(200000);
+	dump_regs();
+}
+
+/* ---- scenario 5d: multi-tap on port 1 ---- */
+static void sc_intback_multitap_p1(void)
+{
+	uint8_t iregs[3] = { 0x01, 0x08, 0xF0 };
+	trace_mark("intback_multitap_p1 (tap on port 1)");
+	setup_common(0x5, TB_CLOCK_NTSC_352, false);
+	/* A tap on port 1 rather than port 0.  Two things this pins down:
+	 * port_device_index() has to leave port 0 on the first virtual slot
+	 * instead of letting the tap swallow it, and the tap's own sub-slot
+	 * cursor starts at slot 1 rather than slot 0 -- Beetle's MapPorts()
+	 * walks one cursor across both ports, so a tap on port 1 begins
+	 * exactly where port 0 left off.
+	 *
+	 * The sub-pads are in digital mode on purpose: the multi-tap's
+	 * id1 == 0xB branch is a different packet from its analog one and no
+	 * other scenario takes it. */
+	tb_pad_set_buttons(&g_ports[0][TB_PAD_BTN], 0x0A05);
+	for (int i = 1; i < 4; i++)
+		tb_pad_set_buttons(&g_ports[i][TB_PAD_BTN],
+		                   (uint16_t)(i * 0x0331));
+	tb_backend->set_input(0, "3dpad", g_ports[0]);
+	tb_backend->set_input(1, "3dpad", g_ports[1]);
+	tb_backend->set_input(2, "3dpad", g_ports[2]);
+	tb_backend->set_input(3, "3dpad", g_ports[3]);
+	tb_backend->set_input(4, "none", g_ports[4]);
+	tb_backend->set_input(5, "none", g_ports[5]);
+	tb_backend->set_multitap(1, true);
 	tb_backend->reset(false);
 	tb_backend->update_input(1000);
 	intback_exchange(0x10, iregs, 3);
@@ -421,7 +508,7 @@ static void sc_direct_mode(void)
 	tb_backend->update_input(1000);
 
 	/* 3D pad in analog mode so the full packet is served. */
-	tb_pad_set_buttons(&g_ports[0][TB_PAD_3DPAD + 0], 0x1000);
+	tb_pad_set_buttons(&g_ports[0][TB_PAD_BTN], 0x1000);
 
 	tb_write(g_ts, TB_IOSEL, 0x00);	/* SMPC-mediated mode */
 	tb_write(g_ts, TB_DDR1, 0x40);	/* TH as output */
@@ -484,6 +571,9 @@ const TbScenario tb_scenarios[] = {
 	{ "intback_analog",     sc_intback_analog },
 	{ "intback_mouse",      sc_intback_mouse },
 	{ "intback_multitap",   sc_intback_multitap },
+	{ "intback_digital_buttons", sc_intback_digital_buttons },
+	{ "intback_gamepad",    sc_intback_gamepad },
+	{ "intback_multitap_p1", sc_intback_multitap_p1 },
 	{ "settime_smem",       sc_settime_smem },
 	{ "command_matrix",     sc_command_matrix },
 	{ "direct_mode",        sc_direct_mode },
