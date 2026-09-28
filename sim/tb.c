@@ -648,11 +648,13 @@ static void sc_intback_rtc_oscillator(void)
 	 * +50 000 ppm the watch crystal runs 5% fast, so its second is
 	 * 3 800 000 core clocks and the same interval is 78.485.
 	 *
-	 * Expect 15:05:23, not the 15:05:19 a nominal crystal reports.  78.485
-	 * clears both boundaries: 78.4 and 78.6 frames also report 15:05:23, so
-	 * the answer holds across 200 frames, a third of a second of model
-	 * time.  The first choice of 3 000 frames was not usable -- it landed on
-	 * 56.06, a hundredth of a second past a boundary.
+	 * Expect 15:05:23, not the 15:05:19 a nominal crystal reports.  The
+	 * margin is asymmetric and small: 78.485 is 0.485 past the 78-second
+	 * mark and only 0.515 short of 79, which at 0.0187 model seconds per
+	 * frame is a window 26 frames wide either side.  Measured: 4 180 and
+	 * 4 220 frames both report 15:05:23; 4 170 reports 15:05:22 and 4 230
+	 * already 15:05:24.  The first choice of 3 000 frames was not usable --
+	 * it landed on 56.06, a hundredth of a second past a boundary.
 	 *
 	 * The frame count is bounded by the harness's int32 timestamp: 4 500
 	 * frames is the ceiling before g_ts overflows and tb_advance_to()
