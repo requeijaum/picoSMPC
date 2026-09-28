@@ -1,5 +1,19 @@
 # Timing baseline
 
+> **Every constant below is untrusted.** Not one of them was ever measured on
+> hardware. All of them are Mednafen's, and Mednafen's clock ratio is known to
+> overflow (see below), so the set is internally consistent and externally
+> unverified. There is no console in this project and no hardware capture in
+> `reference/`, so nothing here can be corrected offline — not by better
+> reading, not by more searching.
+>
+> What this baseline is *good for*: durations that only need to be the right
+> *order* of magnitude relative to each other, so the report sequencer's phases
+> overlap and interleave the way a real one does. What it is **not** good for:
+> predicting wall-clock time, driving a pad port, or claiming cycle accuracy.
+> `sim/differ.sh` compares data and effect order for exactly this reason, and
+> never timestamps.
+
 Every timing constant the project knows about, normalised to **SMPC clocks**,
 and where it came from. The SMPC is an HMCS400 core clocked at 4 MHz, so one
 clock is 250 ns. Anything not in this table is a guess.
@@ -8,6 +22,12 @@ Values are transcribed from the sources named in each section. Where they
 disagree, the disagreement is recorded rather than resolved silently — a
 constant that is wrong in three different ways in three different emulators is
 a fact about the state of the art, not about the hardware.
+
+The one genuinely independent hardware datum in the project is the clock
+itself: abrasive's decap notes give 4 MHz with a 1 µs machine cycle
+(`reference/smpc-emulator/HARDWARE.md`), which agrees with the HMCS400
+handbook in the same tree. That fixes the *unit*. It says nothing about the
+delays, which come from Mednafen.
 
 ## Conversion
 
@@ -83,11 +103,19 @@ samples. A real Saturn pad runs TH at a frequency no source in this tree
 states. Beetle's constants imply roughly 40 kHz; pads are generally described
 as running far faster.
 
+This is not a gap that more searching closes. Every tree under `reference/`
+has been searched: the only clock figures that turn up are the SMPC's own
+4 MHz oscillator and 32.768 kHz RTC crystal, plus a note that the *chip* was
+successfully clocked at 10 kHz during the decap — none of which is the pad
+port. There is no logic-analyser capture in the tree to derive a period from.
+
 This is why `EAT_NYBBLE_SETTLE` is a named constant in one place and not
-inlined, and why the pad-port half-period is the first thing to measure on
-hardware. If the true TH period is much shorter than 12.5 µs, the pad master
-has to move into a PIO state machine; the `padif`-style seam in
-`core/include/smpc/iodev.h` is where that swap happens.
+inlined, and why the pad-port half-period is the first thing a deployment with
+hardware would need to measure. If the true TH period is much shorter than
+12.5 µs, the pad master has to move into a PIO state machine; the
+`padif`-style seam in `core/include/smpc/iodev.h` is where that swap happens.
+Without hardware that decision cannot be made, which is part of why the
+firmware phases were abandoned.
 
 ## Per-device analogue thresholds
 

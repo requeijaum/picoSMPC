@@ -5,6 +5,14 @@ reference. They disagree — about register maps, about the status report, about
 the INTBACK handshake. This is the comparison, and what the project does about
 each disagreement.
 
+> **The "Where" column below is not resolvable inside this repository.** Only
+> `reference/beetle/`, `reference/mame_smpc.cpp` and `reference/bluRetro/` ship
+> here; the other four were read from sibling checkouts in a separate tree.
+> Upstream URLs: Ymir `https://github.com/ichard26/Ymir`,
+> Yabause `https://github.com/requeijaum/yabause`,
+> Kronos `https://github.com/FCare/Kronos`,
+> 5thPlanet `https://github.com/hiroshiyui/5thPlanet`.
+
 | Source | Where | Approach |
 |---|---|---|
 | **Beetle / Mednafen** | `reference/beetle/` | the only cycle-based model; the golden oracle |
@@ -17,6 +25,13 @@ each disagreement.
 
 `seta-gx` and `yabause-vita` are Yabause forks with no meaningful SMPC changes.
 `erings` has no SMPC at all (HLE BIOS, CD block only).
+
+> **MAME and the sibling checkouts feed no automated check.** This document is
+> prose, and a claim in it is not a test. The only executable oracle for report
+> framing in the whole project is Beetle, which is also the second data column
+> in `sim/differ.sh` — so a defect inherited from Mednafen or MAME would pass
+> *both* columns. That is the structural weakness of the methodology, and it
+> is why the sections below end by saying how each divergence was settled.
 
 ## Where they agree
 
@@ -150,3 +165,21 @@ The pattern worth noticing: **the newer and less famous implementations are
 the more careful ones.** Beetle has the best timing and the worst field
 documentation; MAME has the best field documentation and no timing at all.
 Neither is authoritative, and the useful thing to do is keep both and diff.
+
+## How each divergence was settled
+
+"Adopted" above says what the model does. It does not say how much the choice
+is worth, and the two are not the same. The honest categories:
+
+| Category | Meaning | Which divergences |
+|---|---|---|
+| **Tested** | a scenario in `sim/tb.c` exercises it, and the derived expectation in `sim/traces/*.expect` is checked on every run | port mode from IREG0; the 32-nybble OREG walk; status block layout; pad packet formats and wire polarity; multi-tap sub-slot cursor; the `id1 == 0xB` and `0x3/0x5` report branches |
+| **Prose only** | decided by reading, with no automated check behind it | the OREG10 field documentation; Kronos's `firstPeri` gate; 5thPlanet's three-stage `intback_stage`; the OREG 0xFF pre-fill (deliberately *not* adopted) |
+| **Open** | sources disagree and no test can currently say who is right | the mouse payload length; the multi-tap count nybble (high per BlueRetro, low per Beetle); whether the pad master re-interrogates each sub-slot |
+
+Everything in the last two rows is where this project is weakest, and none of
+it is a detail: the OREG pre-fill and the count nybble both change bytes that
+`sim/gen_expect.py` currently records as `--`. A reader should treat the
+"Tested" row as the project's actual claim and the other two as open questions
+it has documented but not settled.
+

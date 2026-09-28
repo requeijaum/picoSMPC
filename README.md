@@ -1,12 +1,16 @@
-# smpc-rp2350
+# picoSMPC
 
 A behavioural reimplementation of the Sega Saturn's SMPC — the Hitachi
-HD404920FS / Sega 315-5744 — as portable C, on its way to running on an
-RP2350B as a drop-in replacement for the original chip.
+HD404920FS / Sega 315-5744 — as portable C, with a testbench that checks it
+against expectations derived from hardware references rather than against
+another emulator.
 
-The original chip has no ESD protection on the controller port and burns out.
-A modern replacement also fixes the Saturn's well-known battery drain, and can
-accept a USB HID controller in place of a physical one.
+**This is a research artefact, not a product.** The original plan was an
+RP2350B drop-in replacement for the chip. No hardware is available, so the
+firmware and board phases were abandoned rather than deferred, and what is
+here is the model plus the method that validates it. See
+[Scope](#scope-and-non-goals) and [Known limitations](#known-limitations)
+below — read the second one before relying on any number in this file.
 
 ## Status
 
@@ -16,9 +20,9 @@ accept a USB HID controller in place of a physical one.
 | 1 — portable core skeleton + golden-model harness | done |
 | 2 — command engine, INTBACK, RTC/SMEM | done — command engine, status report, SETTIME, SETSMEM, area code, reset debounce and the peripheral-report path all match |
 | 3 — pad protocol, multi-tap, virtual device | done — digital pad, 3D pad in both modes, mouse, and the multi-tap all match the hardware-derived expectations |
-| 4 — RP2350B firmware (PIO, timebase) | not started |
-| 5 — RTC/NVRAM/STE on hardware | not started |
-| 6 — hardware | not started |
+| 4 — RP2350B firmware (PIO, timebase) | abandoned — no hardware |
+| 5 — RTC/NVRAM/STE on hardware | abandoned — no hardware |
+| 6 — hardware | abandoned — no hardware |
 
 `sim/differ.sh` reports the current state, in two columns:
 
@@ -43,6 +47,7 @@ of the two host interaction sequences happened to run.
 | `status_only`, `command_matrix`, `sysres_ckchg`, `settime_smem` | byte-identical on both columns |
 | `intback_one_pad`, `intback_analog`, `intback_digital_buttons`, `intback_multitap`, `intback_multitap_p1`, `direct_mode` | byte-identical on both columns |
 | `intback_mouse` | passes the hardware column; `INFO` against Beetle on the payload bytes |
+| `intback_gamepad` | outside both columns by design; its recorded trace matches Beetle byte for byte |
 
 The one Beetle divergence is the documented mouse payload-length
 disagreement: BlueRetro sends four payload bytes for a standalone mouse
@@ -116,7 +121,78 @@ the reference one. Its trace is recorded at
 ./build/tb ours intback_gamepad
 ```
 
+## Scope and non-goals
+
+**In scope.** A portable, allocation-free model of the SMPC register file,
+command engine and INTBACK report sequencer, plus a testbench that can prove
+the model right about *data* and *effect order* from documentation, without a
+console.
+
+**Out of scope, and why.**
+
+- *Cycle-accurate timing.* Every delay in the model comes from Mednafen, whose
+  clock ratio is known to overflow and run its SMPC 5.67× slow. There is no
+  hardware here to measure the true value against, so the timing set is
+  **untrusted** and stays that way. See `docs/timing-baseline.md`.
+- *Replacing the chip.* Phases 4–6 needed a board and a PIO design against a
+  pad-port half-period that no source states. Neither exists.
+- *Proving the model complete.* Three of eight device types and none of the
+  environment callbacks are covered; see below.
+
+## Known limitations
+
+Read this before trusting any figure above. Every row is checkable.
+
+| Limitation | Where to check it |
+|---|---|
+| The model is **data-correct, timing-untrusted**. No constant in `core/` was ever measured; all of them are Mednafen's, from a source this project shows is wrong about time. | `docs/timing-baseline.md` |
+| The controller-port **TH half-period is unknown and unknowable offline**. Nothing in `reference/` states it, and there is no hardware capture in the tree. It is the one number a real deployment would need first. | `docs/timing-baseline.md` |
+| **Only 3 of 8 device types** are exercised by a scenario: `3dpad`, `mouse`, `gamepad`. `WHEEL`, `MISSION`, `KEYBOARD` and `GUN` are implemented and untested — including `WHEEL`'s hysteresis thresholds, which are among the few genuinely *measured* numbers in the project. | `sim/tb.c`, `core/include/smpc/iodev.h` |
+| **No `SmpcEnv` callback is asserted.** All eight are recorded in the trace, and `differ.sh` never reads them, so `MSHON`/`SSHON`/`SNDON`/`CDON`/`NMIREQ`/`RESENAB` are checked only for the command byte they leave in `OREG[31]`. | `sim/differ.sh` (zero references to `EVT`) |
+| The differ compares **`OREG` and `SR` only**. `smpc_get_rtc`, `smpc_get_smem` and `smpc_read_reg` have no test at all. | `sim/differ.sh` |
+| **Beetle is the only executable oracle for report framing.** MAME is consulted in prose only, and abrasive's HMCS400 work feeds no automated check. A bug inherited from MAME or Mednafen would pass *both* columns. | `docs/smpc-implementations.md` |
+| `intback_mouse` has **two bytes with no derivation**, and `intback_gamepad` is in neither column. Both are recorded as `--`, never guessed. | `sim/traces/*.expect` |
+| Whether the SMPC **re-interrogates each multi-tap sub-slot** is unconfirmed: BlueRetro answers with a pre-assembled buffer, so it shows *what* the reply is, not *how* the SMPC asks. | `docs/controller-port.md` |
+
+The recurring failure mode behind most of these is worth stating: a code path
+with no scenario is a code path where a bit-packing bug can live for months.
+The 3-bit `nyb_source` mask sat in the `id1 == 0xB` branch until a single
+scenario reached it. Coverage, not correctness, is what this model is short of.
+
+## Layout
+
+```
+core/     the model.  Portable C99, no dependencies, no allocation after init.
+sim/      testbench, golden-model harness, and the expectation generator.
+docs/     timing baseline and architecture notes.
+tools/    fetch-reference.sh -- populates reference/ with the third-party trees.
+reference/  golden model and reverse-engineering material.  Not built.
+```
+
+`reference/bluRetro/` and `reference/smpc-emulator/` are **not** in the
+repository — the first is 3 MB of someone else's history, and the second
+contains Sega's SMPC ROM and the Saturn Service Manual, which are not ours to
+redistribute. `tools/fetch-reference.sh` clones both from their canonical
+URLs. See `NOTICE.md` for provenance and licensing.
+
 ## Build and test
+
+```sh
+tools/fetch-reference.sh       # once: clones the excluded reference trees
+```
+
+`BEETLE_ROOT` must point at a `beetle-saturn-libretro` checkout; it defaults
+to `~/projects/saturn_emulator_for_chinese_handhelds/beetle-saturn-libretro`.
+`arm-none-eabi-gcc`, `cmake` and `ninja` are already installed. `pico-sdk` and
+`picotool` are not, and are not needed — phase 4 was abandoned.
+
+Everything, in one command:
+
+```sh
+python3 sim/gen_expect.py --check && ./sim/build.sh && ./sim/differ.sh
+```
+
+Individually:
 
 ```sh
 ./sim/build.sh          # needs BEETLE_ROOT, see below
@@ -124,22 +200,6 @@ the reference one. Its trace is recorded at
 DIFF_VERBOSE=1 ./sim/differ.sh   # with diffs
 ./build/tb ours         # our core only, all scenarios
 ./build/tb beetle       # the golden model only
-```
-
-`BEETLE_ROOT` must point at a `beetle-saturn-libretro` checkout; it defaults
-to `~/projects/saturn_emulator_for_chinese_handhelds/beetle-saturn-libretro`.
-`arm-none-eabi-gcc`, `cmake` and `ninja` are already installed. `pico-sdk` and
-`picotool` are not yet, and are not needed until phase 4.
-
-## Layout
-
-```
-core/     the model.  Portable C99, no dependencies, no allocation after init.
-sim/      testbench and the golden-model harness.
-docs/     timing baseline and architecture notes.
-reference/  golden model and reverse-engineering material.  Not built.
-rtl/      RP2350B firmware.  Not written yet.
-hw/       board notes.  Not started.
 ```
 
 ## Reading order
@@ -179,7 +239,15 @@ hw/       board notes.  Not started.
 
 ## Licence and provenance
 
-The model is our own work. The golden model in `reference/beetle/` is Mednafen's,
-GPLv3, unmodified and unlinked into anything we ship. The reverse-engineering
-material in `reference/smpc-emulator/` is abrasive's, CC-BY. Sega's SMPC ROM
-and the Saturn Service Manual are Sega's and are not redistributed here.
+`core/`, `sim/`, `docs/` and `tools/` are our own work and are MIT licensed —
+see [LICENSE](LICENSE). Full provenance for every third-party part, including
+the two trees deliberately *not* redistributed, is in
+[NOTICE.md](NOTICE.md), with the licence texts in `reference/licences/`.
+
+The short version: the golden model in `reference/beetle/` is Mednafen's,
+GPL-2.0-or-later, unmodified and unlinked into anything we ship. The
+controller-port reference in `reference/bluRetro/` is BlueRetro's, Apache-2.0.
+The reverse-engineering material in `reference/smpc-emulator/` is abrasive's,
+CC-BY, and is where the hardware facts in `docs/` come from. Sega's SMPC ROM
+and the Saturn Service Manual are Sega's, and are not in this repository at
+all.

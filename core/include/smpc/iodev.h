@@ -24,16 +24,39 @@
 
 typedef struct SmpcIoDev SmpcIoDev;
 
+/*
+ * Peripheral models, and how much of each one is actually checked.
+ *
+ * The "covered" marks are load-bearing, not decoration.  A code path with no
+ * scenario is a path where a bit-packing bug can sit uncaught: the 3-bit mask
+ * in smpc.c's nyb_source survived until a single scenario reached the
+ * id1 == 0xB branch, which only the plain gamepad ever enters.  Four of these
+ * eight are implemented and untested, so read their bus functions as
+ * unverified.  See the "Known limitations" table in README.md.
+ */
 typedef enum
 {
 	SMPC_DEV_NONE = 0,
-	SMPC_DEV_GAMEPAD,	/* "3-button pad", unimplemented upstream as a real device */
-	SMPC_DEV_3DPAD,		/* 3D Control Pad; digital mode == Saturn Control Pad */
-	SMPC_DEV_MOUSE,		/* Saturn Mouse / Shuttle Mouse */
-	SMPC_DEV_WHEEL,		/* Arcade Racer */
-	SMPC_DEV_MISSION,	/* Mission Stick (3- or 6-axis) */
-	SMPC_DEV_GUN,		/* Virtua Gun */
-	SMPC_DEV_KEYBOARD	/* Saturn Keyboard */
+	SMPC_DEV_GAMEPAD,	/* "3-button pad", unimplemented upstream as a real device.
+				 * Covered by intback_gamepad, which sits outside both
+				 * differ.sh columns -- the trace is recorded and
+				 * matches Beetle byte for byte, but nothing fails if
+				 * it regresses. */
+	SMPC_DEV_3DPAD,		/* 3D Control Pad; digital mode == Saturn Control Pad.
+				 * Covered: digital buttons, all-buttons analog,
+				 * both behind a multi-tap, and as the empty-port
+				 * contrast in direct_mode. */
+	SMPC_DEV_MOUSE,		/* Saturn Mouse / Shuttle Mouse.  Covered by
+				 * intback_mouse, but two payload bytes are
+				 * recorded `--` because the sources disagree on
+				 * the packet length. */
+	SMPC_DEV_WHEEL,		/* Arcade Racer.  UNTESTED.  Its hysteresis
+				 * thresholds below are among the few genuinely
+				 * measured numbers in the project, and nothing
+				 * checks them. */
+	SMPC_DEV_MISSION,	/* Mission Stick (3- or 6-axis).  UNTESTED. */
+	SMPC_DEV_GUN,		/* Virtua Gun.  UNTESTED. */
+	SMPC_DEV_KEYBOARD	/* Saturn Keyboard.  UNTESTED. */
 } SmpcDevType;
 
 /* Port pin encoding, shared by the master and the peripheral side.

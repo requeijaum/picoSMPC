@@ -6,7 +6,24 @@ Saturn controller port with a real ESP32, in production, and is validated
 against real consoles. It answers several questions no emulator in the tree
 answers, and it *disagrees* with Mednafen about some of them.
 
-Apache-2.0. Not built, not linked, not shipped.
+Apache-2.0. Not built, not linked, not shipped. Fetch it with
+`tools/fetch-reference.sh`.
+
+A second, independent hardware source backs up the parts BlueRetro cannot
+speak to. abrasive's decap notes (`reference/smpc-emulator/HARDWARE.md`) are
+written from the die itself and the Hitachi HMCS400 handbook, and they settle
+one structural question the emulators all get wrong in different ways:
+
+> Some of the host-visible registers are for talking directly to game
+> controllers — see the Parallel I/O Registers section in the SMPC manual — and
+> **do not appear to be visible to the MCU.**
+
+So `PDR`, `DDR` and `IOSEL` are not an SMPC register file the chip drives. The
+SH-2 can poke them directly, and when it does the pad port answers the SH-2
+rather than the SMPC — which is a real mode, exercised by the `direct_mode`
+scenario, and not a corner case invented by an emulator. The same file also
+gives the only non-emulator timing datum in the project: a 4 MHz oscillator
+and a 1 µs machine cycle.
 
 ## The pins
 
