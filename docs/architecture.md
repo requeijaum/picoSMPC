@@ -3,8 +3,12 @@
 ## What this is
 
 A behavioural reimplementation of the Sega Saturn's SMPC — the Hitachi
-HD404920FS / Sega 315-5744, an HMCS400 4-bit MCU running at 4 MHz — intended to
-replace the original chip in a real console with an RP2350B.
+HD404920FS / Sega 315-5744, an HMCS400 4-bit MCU running at 4 MHz — with a
+testbench that checks it against expectations derived from hardware references.
+The original plan was an RP2350B drop-in replacement for the chip; no hardware
+is available, so that was abandoned rather than deferred, and the model plus
+the method that validates it is the artefact. See the top-level README for the
+scope and what is deliberately out of it.
 
 The port is not a serial device. The SMPC is an 8-bit parallel slave on the
 SH-2 bus, and it is the *master* on the controller port. Both of those
@@ -17,9 +21,14 @@ link.
 core/     portable C99, no dependencies, no floating point, no allocation
           after init.  This is the model.
 sim/      native testbench.  Runs the scenarios in tb.c twice: once against
-          our core, once against Mednafen's SMPC, and diffs the two traces.
-rtl/      RP2350B firmware (not yet written).
+          our core, once against Mednafen's SMPC, and reports two columns --
+          the hardware-derived expectations and the Mednafen recording.
 ```
+
+There is no third layer. A firmware layer for an RP2350B was planned and
+dropped; `core` never talked to hardware and does not now, which is why it is
+portable C and why it still builds for a microcontroller without being built
+for one.
 
 `core` never talks to hardware. Everything it does outside its own register
 file goes through `SmpcEnv` in `core/include/smpc/smpc.h`, so the same object

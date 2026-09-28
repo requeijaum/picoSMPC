@@ -92,8 +92,50 @@ reference in the tree, and they are the basis of the core's `EAT_*` macros.
 | poll granularity | — | — | `smpc.c:1064` | condition polls re-evaluate every 1000 master clocks |
 | short poll | — | — | `smpc.c:1053` | SSHON/SSHOFF wait, every 8 master clocks |
 | CKCHG352/320 | ~8 vblanks | ~233 ms | `smpc.c:1313-1320` | reset stall before the clock change |
-| RTC tick | 4 000 000 | 1000 | `smpc.c:1246` | 32.768 kHz crystal divided down |
+| RTC tick | 4 000 000 | 1000 | `smpc.c:1246` | 4 MHz core clocks, *not* the watch crystal — see below |
 | SH-2 bus access | 9 | — | `ss.c` | Beetle's comment says a 9-cycle figure is "accurate but too slow" |
+
+## The two oscillators, and which one the RTC actually uses
+
+The SMPC does not have one clock. It has two:
+
+| Oscillator | Frequency | Drives |
+|---|---:|---|
+| Core | **4 MHz** | the HMCS400, one machine cycle per µs |
+| Watch, on `OSC1`/`OSC2` | **32.768 kHz** | Timer A, the one-second RTC tick, and the timer interrupt that wakes the core |
+
+and a third, observable signal derived from the second: pin D0 carries the RTC
+oscillator divided by two, 16.384 kHz. Both are documented in
+`reference/smpc-emulator/HARDWARE.md` and `DUMPING.md`, from the die and the
+HMCS400 handbook.
+
+On the chip, the RTC second is 32 768 counts of the watch crystal. That is a
+*different oscillator* from the one the CPU runs on, with its own tolerance —
+a tuning-fork crystal is typically ±20 ppm, while a consumer 4 MHz part is
+several times worse. So the RTC's long-term accuracy is set by the watch
+crystal, and the core oscillator's error does not reach it.
+
+**This model does not model that.** `rtc_clock_accum` is fed the same 32.32
+core-clock count as `clock_counter` (`core/src/smpc.c`), and the second falls
+out at 4 000 000 core clocks. There is no `32768` anywhere in `core/`. Mednafen
+does the same thing — `smpc.c:1246` is `RTC.ClockAccum >= (4000000ULL << 32)` —
+so this is inherited, not invented, and it is why the RTC inherits the *core*
+crystal's error: roughly ±100 ppm where the hardware would give ±20 ppm, or
+about ±3 150 s/year against ±630 s/year.
+
+For anything that runs for seconds or minutes the two are indistinguishable,
+which is why this was not found earlier and why it is written down now rather
+than fixed: separating it means giving the RTC its own rate parameter, and
+with no hardware there is nothing to calibrate that parameter against. It is
+recorded in the README's limitations table alongside the rest.
+
+A related absence: the core is powered by the host *and* a CR2032, and the RTC
+oscillator keeps counting with the console off. The supply monitor (IC25 on VA0)
+raises interrupt 0 and wipes the save RAM when the battery is discharged with
+main power off. None of that is modelled here — `rtc_valid` is a static flag
+that measures nothing, and `docs/` records it as absent. Saturn_MiSTer's HLE is
+weaker still: its RTC is `EXT_RTC` from the FPGA's own clock, with no
+oscillator at all.
 
 ## The one number that is not known
 

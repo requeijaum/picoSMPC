@@ -166,6 +166,9 @@ Read this before trusting any figure above. Every row is checkable.
 | Whether the SMPC **re-interrogates each multi-tap sub-slot** is unconfirmed: BlueRetro answers with a pre-assembled buffer, so it shows *what* the reply is, not *how* the SMPC asks. | `docs/controller-port.md` |
 | The port mode echoed in SR is read from **IREG0**, against the manual and now against 4 of the 7 implementations surveyed — including the FPGA core people actually run games on. The model sits on the minority side. | `docs/smpc-implementations.md` §1 |
 | The two port modes are **one field copied, not two fields**. If the chip carries a per-port mode, this model cannot produce SR bits 0-1 differing from bits 2-3. Found by reading `Saturn_MiSTer`, undocumented before. | `docs/smpc-implementations.md` §1b |
+| The RTC second is counted in **4 MHz core clocks, not the 32.768 kHz watch crystal** the chip uses, so the model inherits the core crystal's error (±~100 ppm) where the hardware gets ±~20 ppm — about ±3 150 s/year against ±630. Inherited from Mednafen, which does the same. | `docs/timing-baseline.md` |
+| **No battery, no supply monitor.** The core runs from the host *and* a CR2032, the RTC keeps counting with the console off, and IC25 raises interrupt 0 and wipes the save RAM when the battery is discharged. None of it is modelled; `rtc_valid` is a static flag that measures nothing. | `docs/timing-baseline.md` |
+| Pin D0's **16.384 kHz** output — the RTC oscillator divided by two, readable by the host in direct mode — does not exist in the model. | `docs/timing-baseline.md` |
 
 The recurring failure mode behind most of these is worth stating: a code path
 with no scenario is a code path where a bit-packing bug can live for months.
@@ -229,7 +232,7 @@ DIFF_VERBOSE=1 ./sim/differ.sh   # with diffs
 6. `core/src/smpc.c` — the command engine and the report sequencer.
 7. `sim/tb.c` — the scenarios, which are the actual specification.
 
-## Three findings worth knowing about up front
+## Four findings worth knowing about up front
 
 - **The SMPC's address pins are the SH-2's A2..A7, not A1..A6.** The register
   index is `(byte_address & 0x7F) >> 1`. Assuming otherwise shifts every

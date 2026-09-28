@@ -1,9 +1,15 @@
-# Four SMPC implementations, compared
+# The SMPC implementations in reach, compared
 
-There are four independent SMPC models in this tree, plus a hardware
+Several independent SMPC models are in reach from here, plus a hardware
 reference. They disagree — about register maps, about the status report, about
 the INTBACK handshake. This is the comparison, and what the project does about
 each disagreement.
+
+The list is seven models plus the peripheral-side reference: Beetle/Mednafen,
+Ymir, Yabause and its Kronos fork, MAME, 5thPlanet, and Saturn_MiSTer. Four of
+them are ports of each other or cite each other, so the number of *opinions*
+is smaller than the number of rows — the interesting part is which
+implementations arrived at which conclusion independently.
 
 > **The "Where" column below is not resolvable inside this repository.** Only
 > `reference/beetle/`, `reference/mame_smpc.cpp` and `reference/bluRetro/` ship
@@ -36,11 +42,13 @@ core plus `SMPC.sv`; `rtl/Saturn/SMPC_HLE.sv` is a 37 KB HLE. Both appear in
 `Saturn.qip`, but only the HLE is instantiated — `Saturn.sv:790` declares
 `SMPC_HLE SMPC`. The cycle-accurate one is dormant.
 
-That makes the HLE the model with the strongest claim to working: it is what
-sat behind thousands of hours of people playing Saturn games on FPGA. Where it
-disagrees with the emulators that is not a tie — and two of the places it
-disagrees, the port mode and the empty-port report byte, are divergences this
-project had previously scored differently.
+That makes the HLE the model with the strongest claim to working: it is the one
+implementation here under continuous test by people playing Saturn games on
+FPGA — its own README claims "many games tested over the course of the
+development", and that is the claim, not this document's. Where it disagrees
+with the emulators that is not a tie — and two of the places it disagrees, the
+port mode and the empty-port report byte, are divergences this project had
+previously scored differently.
 
 Its three peripheral families match ours exactly: `0xB` (Control Pad), `0x3`
 (Mouse) and `0x5` (TL-negotiated), with `0xA`/`0xF` folded into "nothing". No
@@ -156,6 +164,7 @@ what the adopted reading of §1 implies — but it is a choice with a shape
 behind it, not an obviousness, and it is listed as an open question in the
 README.
 
+### 2. Is OREG pre-filled with 0xFF?
 
 MAME fills OREG16..30 and calls them "undefined"; Kronos fills OREG0..30.
 Beetle, Ymir, Yabause and this project leave them at their reset value.
