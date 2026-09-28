@@ -70,6 +70,10 @@ typedef struct
 	void     (*set_input)(unsigned port, const char *type, uint8_t *ptr);
 	void     (*set_multitap)(unsigned sport, bool enabled);
 	void     (*set_rtc)(const struct tm *ht, uint8_t lang);
+	/* Watch-crystal tolerance in ppm.  Only our model has the concept;
+	 * the reference backend ignores it, which is why the scenario that
+	 * uses this is expected to diverge from Beetle. */
+	void     (*set_rtc_oscillator)(int32_t ppm);
 	void     (*transform_input)(void);
 	void     (*update_input)(int32_t el);
 	void     (*update_output)(void);
@@ -109,6 +113,7 @@ void    tb_advance_to(int32_t ts);
 void    tb_advance(int32_t delta);
 
 int32_t tb_master_clock_hz(int clock_mode);
+int32_t tb_smpc_master_clock(int clock_mode);
 int32_t tb_line_cycles(int clock_mode);	/* one scanline, in master clocks */
 
 /*

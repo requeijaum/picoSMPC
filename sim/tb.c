@@ -50,6 +50,34 @@ int32_t tb_master_clock_hz(int clock_mode)
 	}
 }
 
+/*
+ * The argument smpc_init() wants is NOT the SH-2 clock.  It is that clock
+ * already multiplied by the clock divisor, which is what Mednafen's ss.c
+ * passes: 1746818182 for NTSC, i.e. 28636364 * 61.  The divisor in
+ *
+ *     ClockRatio = (1 << 32) * 4000000 * CurrentClockDivisor / MasterClock
+ *
+ * then cancels, leaving 4e6 / 28.636364 MHz -- 0.1397 core clocks per host
+ * tick, so sixty video frames come to one RTC second, as they must.
+ *
+ * Handing it the undivided clock instead leaves the divisor uncancelled: the
+ * model ran at 8.52 core clocks per tick, which measured 61.2x too fast, and
+ * no test could see it because both backends got the same wrong value.  See
+ * docs/timing-baseline.md.
+ *
+ * 61 unconditionally, in every mode, because that is what the reference does.
+ * Beetle keeps one MasterClock for the whole run and lets CurrentClockDivisor
+ * move 65 <-> 61 across a CKCHG, which leaves 320 mode about 1% fast.  Matching
+ * that is deliberate: the two columns are only worth comparing if the harness
+ * reproduces the reference's mistake as well as its formula.
+ */
+#define TB_SMPC_MASTER_CLOCK_SCALE 61
+
+int32_t tb_smpc_master_clock(int clock_mode)
+{
+	return tb_master_clock_hz(clock_mode) * TB_SMPC_MASTER_CLOCK_SCALE;
+}
+
 int32_t tb_line_cycles(int clock_mode)
 {
 	const int lines = (clock_mode == TB_CLOCK_PAL_352 || clock_mode == TB_CLOCK_PAL_320) ? 313 : 263;
@@ -243,7 +271,7 @@ static void setup_common(uint8_t area, int clock_mode, bool digital_pad)
 	}
 	(void)digital_pad;
 
-	tb_backend->init(area, g_master_clock, false);
+	tb_backend->init(area, tb_smpc_master_clock(clock_mode), false);
 	for (unsigned i = 0; i < 6; i++)
 		tb_backend->set_input(i, "none", g_ports[i]);
 	tb_backend->set_input(12, "misc", &g_misc[0]);
@@ -541,6 +569,98 @@ static void sc_direct_mode(void)
 	dump_regs();
 }
 
+/* ---- scenario 8b: the RTC actually ticking ---- */
+static void sc_intback_rtc_tick(void)
+{
+	uint8_t iregs[3] = { 0x01, 0x00, 0xF0 };
+
+	/* The one behaviour of the RTC that nothing else here checks: that it
+	 * rolls over on its own, in BCD, on a vblank boundary.  rtc_inc_second()
+	 * runs on every scenario -- sysres_ckchg advances four seconds' worth --
+	 * but until now no assertion could see the result, because the
+	 * scenarios that report the status block advance under a second and the
+	 * ones that advance enough never report.
+	 *
+	 * Frames have to be run one at a time.  do_vblank_housekeeping() is
+	 * where the clock is drained, so a single large tb_advance() moves
+	 * model time without ever producing a vblank edge and the clock stands
+	 * still -- which is what made the first version of this scenario read
+	 * the same second at 4 000 000 ticks as at 1 700 000.
+	 *
+	 * 330 NTSC frames is 5.5 s, so the clock has advanced five seconds and
+	 * is half a second clear of both the five- and six-second boundaries.
+	 * Measured, not assumed: 300 frames also reports 0x10 and 360 reports
+	 * 0x11, so the answer holds across a whole second's worth of frames and
+	 * this sits in the middle of it.  That is also the check that a frame is
+	 * worth 1/60 s and not something else, which is the calibration the
+	 * harness previously had wrong by 61x.
+	 */
+	trace_mark("intback_rtc_tick (the RTC rolls over, in BCD, on its own)");
+	setup_common(0x5, TB_CLOCK_NTSC_352, true);
+	tb_backend->set_input(0, "none", g_ports[0]);
+	tb_backend->set_input(1, "none", g_ports[1]);
+	tb_backend->reset(false);
+
+	for (int i = 0; i < 330; i++) {
+		tb_backend->start_frame();
+		run_frame();
+	}
+
+	/* Status report only -- IREG1 = 0x00 is what asks for it.  The
+	 * peripheral half would overwrite the head of the block, and the RTC is
+	 * at OREG[1..7], which the status half leaves alone. */
+	intback_exchange(0x10, iregs, 3);
+	tb_advance(1000);
+	dump_regs();
+}
+
+/* ---- scenario 8c: the watch crystal's tolerance ---- */
+static void sc_intback_rtc_oscillator(void)
+{
+	uint8_t iregs[3] = { 0x01, 0x00, 0xF0 };
+
+	/* The core oscillator and the 32.768 kHz watch crystal are separate
+	 * parts, and the RTC's second is the watch crystal's 32 768 cycles, not
+	 * 4 000 000 of core clock.  On a console the two drift apart at their
+	 * own rates; the model has one timebase, so smpc_set_rtc_oscillator()
+	 * is what lets it say which one it is imitating.
+	 *
+	 * 50 000 ppm is 5%, which is far worse than a real tuning-fork crystal
+	 * (~20 ppm).  It is exaggerated on purpose: at 5% fifty seconds of
+	 * running time separates the two readings by two whole seconds, so the
+	 * effect is unmistakable in a test that runs in a second.  At a
+	 * realistic 20 ppm the same gap needs about four minutes of model time,
+	 * which the harness cannot reach anyway -- see the note on frame count
+	 * below.
+	 *
+	 * 3 000 NTSC frames is 50 s.  At 0 ppm that is 50 model seconds, giving
+	 * 15:04:55; at +50 000 ppm the watch crystal runs 5% fast and gets to
+	 * 52, giving 15:04:57.  Expect the later one.  52.5 model seconds sits
+	 * clear of both boundaries, and the reference backend, which has no such
+	 * concept, will report the earlier time.
+	 *
+	 * The frame count is bounded by the harness's int32 timestamp: an NTSC
+	 * frame is 477 082 master ticks, so 4 500 frames is the ceiling before
+	 * g_ts overflows and tb_advance_to() reports that time went backwards.
+	 * That is why the ppm is exaggerated rather than the run lengthened.
+	 */
+	trace_mark("intback_rtc_oscillator (+50000 ppm on the watch crystal)");
+	setup_common(0x5, TB_CLOCK_NTSC_352, true);
+	tb_backend->set_input(0, "none", g_ports[0]);
+	tb_backend->set_input(1, "none", g_ports[1]);
+	tb_backend->set_rtc_oscillator(50000);
+	tb_backend->reset(false);
+
+	for (int i = 0; i < 3000; i++) {
+		tb_backend->start_frame();
+		run_frame();
+	}
+
+	intback_exchange(0x10, iregs, 3);
+	tb_advance(1000);
+	dump_regs();
+}
+
 /* ---- scenario 9: SYSRES and CKCHG352, which span many frames ---- */
 static void sc_sysres_ckchg(void)
 {
@@ -574,6 +694,8 @@ const TbScenario tb_scenarios[] = {
 	{ "intback_digital_buttons", sc_intback_digital_buttons },
 	{ "intback_gamepad",    sc_intback_gamepad },
 	{ "intback_multitap_p1", sc_intback_multitap_p1 },
+	{ "intback_rtc_tick",   sc_intback_rtc_tick },
+	{ "intback_rtc_oscillator", sc_intback_rtc_oscillator },
 	{ "settime_smem",       sc_settime_smem },
 	{ "command_matrix",     sc_command_matrix },
 	{ "direct_mode",        sc_direct_mode },

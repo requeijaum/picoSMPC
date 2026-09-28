@@ -433,6 +433,30 @@ def build_expectations():
         "  10  OREG[31] is the last command and does not move",
     ], [[oreg], [sr_after(True, True)]])
 
+    # ---- intback_rtc_tick -------------------------------------------------
+    # 330 NTSC frames is 5.5 s of video at 60 Hz -- a fact about the console,
+    # not about this model.  The RTC is 32 768 cycles of a 32.768 kHz crystal
+    # (reference/smpc-emulator/HARDWARE.md), i.e. one second, so five whole
+    # seconds have passed and the clock reads 05 + 5.
+    rtc_5s = dict(TM, second=TM["second"] + 5)
+    oreg = status_block(0x5, rtc_bytes(rtc_5s), base_smem(), 0x10)
+    out["intback_rtc_tick"] = ([
+        "the RTC advancing on its own, which no other scenario could see.",
+        "  330 NTSC frames = 5.5 s of video at 60 Hz, so floor(5.5) = 5 whole",
+        "      RTC seconds pass and [7], the seconds byte, goes 05 -> 10.",
+        "      The BCD carry is the point: 09 + 1 must be 0x10, not 0x0A.",
+        "  0x8000 milliseconds of running time is the only way to see it.  The",
+        "      model drains the RTC in do_vblank_housekeeping(), so it only",
+        "      ticks on a vblank edge, and every scenario that reports the",
+        "      status block advances under a second.",
+        "the model agrees with the derivation, but not by a wide margin and",
+        "not for the reason it should.  The harness emits 28 MHz frames while",
+        "the SMPC sits in its power-on 26 MHz mode -- nothing has issued",
+        "CKCHG352 -- so a frame is worth 1.0654 model seconds and 330 frames",
+        "is 5.858, not 5.5.  The floor is still 5, but only 0.142 s clear of",
+        "the next boundary.  See docs/timing-baseline.md.",
+    ], [[oreg], [sr_after(True, False)]])
+
     # ---- settime_smem -----------------------------------------------------
     smem_cmd = [0x08, 0x03, 0x10, 0x11]
     rtc_cmd = [0x08, 0x03, 0x10, 0x11, 0x12, 0x13, 0x14]

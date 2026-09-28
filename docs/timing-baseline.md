@@ -115,29 +115,33 @@ a tuning-fork crystal is typically ±20 ppm, while a consumer 4 MHz part is
 several times worse. So the RTC's long-term accuracy is set by the watch
 crystal, and the core oscillator's error does not reach it.
 
-**This model does not model that.** `rtc_clock_accum` is fed the same 32.32
-core-clock count as `clock_counter` (`core/src/smpc.c`), and the second falls
-out at 4 000 000 core clocks. There is no `32768` anywhere in `core/`. Mednafen
-does the same thing — `smpc.c:1246` is `RTC.ClockAccum >= (4000000ULL << 32)` —
-so this is inherited, not invented, and it is why the RTC inherits the *core*
-crystal's error: roughly ±100 ppm where the hardware would give ±20 ppm, or
-about ±3 150 s/year against ±630 s/year.
+**This model now models that, partially.** `smpc_set_rtc_oscillator(s, ppm)`
+gives the watch crystal its own tolerance, and the RTC's second length is
+derived from it rather than hard-wired. The default of 0 ppm is the core
+oscillator's nominal rate and is bit-identical to Mednafen's
+`ClockAccum >= (4000000ULL << 32)`, so nothing changes unless a caller asks
+for it, and a real deployment has to ask: the model has no notion of absolute
+time, so the parameter adds the *ability* to say which crystal it is imitating
+rather than accuracy by itself. The tolerance is deliberately kept off
+`clock_ratio` — the core oscillator does not change across a CKCHG, so the
+number of core clocks in a watch-crystal second is the same in both modes.
 
-For anything that runs for seconds or minutes the two are indistinguishable,
-which is why this was not found earlier and why it is written down now rather
-than fixed: separating it means giving the RTC its own rate parameter, and
-with no hardware there is nothing to calibrate that parameter against. It is
-recorded in the README's limitations table alongside the rest.
+`intback_rtc_oscillator` exercises it at +50 000 ppm, five per cent, which is
+far worse than any real crystal, so that fifty seconds of running time
+separates the two readings by two whole seconds. Its expectation is **not**
+in either column: a synthetic tolerance has no hardware counterpart, so there
+is nothing to derive the expected clock from, and recording a measured value
+would be exactly the guess the `--` policy exists to prevent.
 
 A related absence: the core is powered by the host *and* a CR2032, and the RTC
 oscillator keeps counting with the console off. The supply monitor (IC25 on VA0)
 raises interrupt 0 and wipes the save RAM when the battery is discharged with
 main power off. None of that is modelled here — `rtc_valid` is a static flag
-that measures nothing, and `docs/` records it as absent. Saturn_MiSTer's HLE is
-weaker still: its RTC is `EXT_RTC` from the FPGA's own clock, with no
+that measures nothing, and the README records it as absent. Saturn_MiSTer's HLE
+is weaker still: its RTC is `EXT_RTC` from the FPGA's own clock, with no
 oscillator at all.
 
-## The testbench's clock is 61x off, and no test can see it
+## The harness's clock argument, fixed -- and a second mismatch left
 
 `SMPC_ClockRatio` is computed exactly as Mednafen computes it, and the two
 formulas are character for character the same:
@@ -147,46 +151,44 @@ SMPC_ClockRatio = (1ULL << 32) * 4000000 * CurrentClockDivisor / MasterClock;
 ```
 
 What matters is therefore what `MasterClock` *is*, and here the harness and a
-real integration disagree. Mednafen's `ss.c` passes the SH-2 clock **already
-multiplied by the clock divisor** — `1 746 818 182` for NTSC, which is
-`28 636 364 * 61` — so the divisor in the formula cancels and the ratio comes
-out at `4e6 / 28.636364 MHz`, or 0.1397 core clocks per tick. Sixty video
-frames is one RTC second, as it must be.
+real integration used to disagree. Mednafen's `ss.c` passes the SH-2 clock
+**already multiplied by the clock divisor** — `1 746 818 182` for NTSC, which
+is `28 636 364 * 61` — so the divisor in the formula cancels and the ratio
+comes out at `4e6 / 28.636364 MHz`, or 0.1397 core clocks per tick.
 
-`sim/tb.c` passes the *undivided* SH-2 clock, `28 636 364`, so the divisor
-does not cancel: the ratio is 8.52 core clocks per tick, and one video frame
-comes to about `4 065 000` core clocks — roughly **1.02 RTC seconds per
-frame**. Measured directly, by running a scenario for 100 and 200 frames and
-differencing the clock: **61.2x**, which is `SMPC_CLOCK_DIVISOR_28M` to within
-the rounding. In 320 mode the error is 65x instead.
+`sim/tb.c` passed the *undivided* SH-2 clock, so the divisor did not cancel:
+8.52 core clocks per tick, about `4 065 000` per video frame, which measured
+**1.02 RTC seconds per frame** against a frame's worth of 1/60. Differencing
+the clock across 100 and 200 frames gave 61.2x, which is
+`SMPC_CLOCK_DIVISOR_28M` to within the rounding. `tb_smpc_master_clock()`
+now multiplies by 61, in every mode, because that is what the reference does
+— Beetle keeps one `MasterClock` for the whole run and lets
+`CurrentClockDivisor` move 65 ↔ 61 across a CKCHG, so reproducing the
+reference means reproducing its approximation too.
 
-So the model is right and the harness is wrong, and the two together are
-calibrated 61x away from the video the harness itself generates. Nothing
-detects it, for three independent reasons, which is what makes it worth
-writing down:
+The correction is not merely self-consistent: it is checked against ground
+truth the model never touches. `intback_rtc_tick` runs 330 NTSC frames and
+expects five RTC seconds, because 330 frames is 5.5 s of video at 60 Hz and a
+watch crystal counts one second per 32 768 cycles. Before the fix the same
+scenario read 61.2x too fast. Sixty frames is now exactly one second.
 
-- both backends are handed the same wrong argument, so the two columns agree
-  with each other perfectly;
-- `differ.sh` compares data and effect order and **never compares
-  timestamps** — that was a deliberate choice, to work around the clock-ratio
-  overflow documented above;
-- every scenario's *data* result is insensitive to it. INTBACK completes
-  either way; only the wall-clock cost of the `EAT_*` constants scales.
+**The second mismatch is still there.** The harness emits 28 MHz (352) frames
+while the SMPC sits in its power-on 26 MHz mode, because nothing has issued
+CKCHG352 — which is correct, since a Saturn really does boot in 26 MHz mode,
+and it is `sim/tb.c`'s `TB_CLOCK_NTSC_352` that conflates two different
+things: DOTSEL, which the status report reports, and the clock divisor, which
+only a CKCHG moves. The model therefore converts host ticks at divisor 65
+while the frames claim 28 MHz, and a frame is worth 1.0654 model seconds
+rather than 1. The RTC scenario's floor is unaffected, but only 0.142 s clear
+of the next boundary. Beetle has the same mismatch, so the two columns agree
+and neither is wrong in a way the differ can see.
 
-The consequence is specific and worth stating plainly: **the harness cannot
-test any wall-clock behaviour at all.** Whether the report fits inside
-vblank, whether the reset debounce spans the right number of frames, whether
-`EAT_NYBBLE_SETTLE` is anywhere near the real pad timing — none of it is
-checkable here, and a scenario that asserted "after N frames the clock
-advanced M seconds" would be recording the 61x as if it were the answer.
-
-Fixing it is a one-line change — multiply by the divisor before calling
-`init`, matching `ss.c` — and it was not made here for two reasons. It shifts
-the timing of all eleven existing scenarios, none of which would then be
-reproducing anything measured; and the value it moves *towards* still cannot
-be validated without hardware, so the correction would replace one unverified
-timebase with another. It is recorded as a known defect rather than silently
-fixed.
+What is still untestable: anything whose answer depends on absolute wall-clock
+time. Whether the report fits inside vblank, whether the reset debounce spans
+the right number of frames, whether `EAT_NYBBLE_SETTLE` is near the real pad
+timing. The differ compares data and effect order and never compares
+timestamps — a deliberate choice, made to work around the clock-ratio
+overflow documented above — so a passing run says nothing about any of it.
 
 ## The one number that is not known
 

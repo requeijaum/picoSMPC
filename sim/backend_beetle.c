@@ -30,6 +30,11 @@ static uint8_t be_read(int32_t ts, uint8_t a) { return SMPC_Read(ts, a); }
 static void be_set_input(unsigned port, const char *type, uint8_t *ptr) { SMPC_SetInput(port, type, ptr); }
 static void be_set_multitap(unsigned sp, bool en) { SMPC_SetMultitap(sp, en); }
 static void be_set_rtc(const struct tm *ht, uint8_t lang) { SMPC_SetRTC(ht, lang); }
+/* The reference counts an RTC second as 4 000 000 core clocks, with no
+ * crystal tolerance to set, so there is nothing to pass on.  Our model
+ * diverges from this backend by exactly the ppm given; that is the point of
+ * the scenario, and it is why its column is INFO rather than PASS. */
+static void be_set_rtc_oscillator(int32_t ppm) { (void)ppm; }
 static void be_transform_input(void) { SMPC_TransformInput(); }
 static void be_update_input(int32_t el) { SMPC_UpdateInput(el); }
 static void be_update_output(void) { SMPC_UpdateOutput(); }
@@ -46,7 +51,7 @@ static int32_t be_earliest_event(void)
 
 static const SmpcBackend be_backend = {
 	"beetle", be_init, be_reset, be_start_frame, be_update, be_set_vbvs,
-	be_write, be_read, be_set_input, be_set_multitap, be_set_rtc,
+	be_write, be_read, be_set_input, be_set_multitap, be_set_rtc, be_set_rtc_oscillator,
 	be_transform_input, be_update_input, be_update_output, be_reset_ts, be_poll_system,
 	be_earliest_event,
 };

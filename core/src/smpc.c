@@ -233,6 +233,11 @@ struct Smpc
 	int64_t  clock_ratio;		/* 32.32: master clocks -> SMPC clocks */
 	int64_t  clock_counter;
 	uint64_t rtc_clock_accum;
+	/* Watch-crystal tolerance in parts per million, and the length of an RTC
+	 * second in 32.32 core clocks.  0 ppm means nominal, which is also what
+	 * smpc_init() and smpc_reset() establish. */
+	int32_t  rtc_osc_ppm;
+	int64_t  rtc_second_clocks;
 
 	int32_t  pending_command;	/* command byte, -1 when idle */
 	int32_t  executing_command;
@@ -1686,6 +1691,32 @@ enum
 	} while (0)
 
 /*
+ * How long the watch crystal takes to count 32 768 cycles, expressed in 32.32
+ * SMPC core clocks.
+ *
+ * The core oscillator and the watch crystal are separate parts on the die,
+ * with separate tolerances -- see docs/timing-baseline.md -- so the RTC's
+ * second is a parameter here rather than a constant.  At the default of
+ * 0 ppm it is exactly 4 000 000 << 32, which is bit-identical to what
+ * Mednafen counts.
+ *
+ * Deliberately NOT recomputed alongside clock_ratio.  clock_ratio converts
+ * host timestamps into core clocks and moves with CKCHG; the core oscillator
+ * does not, so the number of core clocks in an RTC second is the same in
+ * 26 MHz and 28 MHz mode.  Coupling the two would reintroduce the coupling
+ * this parameter exists to remove.
+ */
+static void rtc_recompute_second(Smpc *s)
+{
+	/* Divide before multiplying.  (4e6 << 32) * 1e6 is 1.7e22 and overflows
+	 * a uint64 by three orders of magnitude; dividing the scale out first
+	 * makes the intermediate exactly 17179869184, and the product then sits
+	 * near 1.7e16 for any tolerance a real crystal could have. */
+	s->rtc_second_clocks = (int64_t)(((uint64_t)SMPC_CLOCK_HZ << 32) / 1000000) *
+			       (1000000 - (int64_t)s->rtc_osc_ppm);
+}
+
+/*
  * Per-vblank housekeeping, done on the rising edge of the vblank signal.
  *
  * The SMPC takes its timing reference from the VSYNC line, on both edges, so
@@ -1720,12 +1751,17 @@ static void do_vblank_housekeeping(Smpc *s)
 	 * too.  Without it the drain loop runs 4 294 967 296 times per RTC
 	 * second, and the first vblank housekeeping after a long stretch with
 	 * no housekeeping -- the seven frames of a clock change, where
-	 * ST_CKCHG_WAIT consumes pending_vb itself -- never returns. */
-	while (s->rtc_clock_accum >= ((uint64_t)SMPC_CLOCK_HZ << 32)) {
+	 * ST_CKCHG_WAIT consumes pending_vb itself -- never returns.
+	 *
+	 * The threshold is rtc_second_clocks rather than a constant, so the
+	 * watch crystal's tolerance can be modelled; at the default of 0 ppm it
+	 * is exactly 4 000 000 << 32, which is what Mednafen uses. */
+	while ((uint64_t)s->rtc_clock_accum >= (uint64_t)s->rtc_second_clocks) {
 		rtc_inc_second((SmpcRtc *)&s->rtc_raw[0]);
-		s->rtc_clock_accum -= (uint64_t)SMPC_CLOCK_HZ << 32;
+		s->rtc_clock_accum -= (uint64_t)s->rtc_second_clocks;
 	}
 }
+
 
 /*
  * The clock-change command stalls the console for roughly three and a half
@@ -2349,6 +2385,12 @@ void smpc_kill(Smpc *s)
 	}
 }
 
+void smpc_set_rtc_oscillator(Smpc *s, int32_t ppm)
+{
+	s->rtc_osc_ppm = ppm;
+	rtc_recompute_second(s);
+}
+
 void smpc_reset(Smpc *s, bool powering_up)
 {
 	s->slave_sh2_pending = 0;
@@ -2401,6 +2443,9 @@ void smpc_reset(Smpc *s, bool powering_up)
 	s->phase = ST_WAIT_PENDING;
 	s->pending_vb = false;
 	s->clock_counter = 0;
+	/* Re-derive, do not reset: the caller's crystal tolerance is
+	 * configuration, and smpc_reset() must not silently discard it. */
+	rtc_recompute_second(s);
 	s->ir0wx = 0;
 	s->ir0wa = 0;
 	memset(&s->jr, 0, sizeof s->jr);

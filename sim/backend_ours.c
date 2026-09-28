@@ -130,6 +130,7 @@ static void be_set_input(unsigned port, const char *type, uint8_t *ptr)
 
 static void be_set_multitap(unsigned sp, bool en) { smpc_set_multitap(&g_smpc, sp, en); }
 static void be_set_rtc(const struct tm *ht, uint8_t lang) { smpc_set_rtc(&g_smpc, ht, lang); }
+static void be_set_rtc_oscillator(int32_t ppm) { smpc_set_rtc_oscillator(&g_smpc, ppm); }
 static void be_transform_input(void) { }
 
 /*
@@ -156,7 +157,7 @@ static int32_t be_earliest_event(void) { return TB_NO_EVENT; }
 
 static const SmpcBackend be_backend = {
 	"ours", be_init, be_reset, be_start_frame, be_update, be_set_vbvs,
-	be_write, be_read, be_set_input, be_set_multitap, be_set_rtc,
+	be_write, be_read, be_set_input, be_set_multitap, be_set_rtc, be_set_rtc_oscillator,
 	be_transform_input, be_update_input, be_update_output, be_reset_ts, be_poll_system,
 	be_earliest_event,
 };

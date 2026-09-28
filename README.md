@@ -40,13 +40,14 @@ whatever the SH-2 last put on the data bus — and bit 0 is exercised
 functionally by every poll in `sim/tb.c`, so a dump would only record which
 of the two host interaction sequences happened to run.
 
-**11 of 11 scenarios pass the hardware column; 10 of 11 match Beetle.**
+**12 of 12 scenarios pass the hardware column; 11 of 12 match Beetle.**
 
 | Scenario | State |
 |---|---|
 | `status_only`, `command_matrix`, `sysres_ckchg`, `settime_smem` | byte-identical on both columns |
 | `intback_one_pad`, `intback_analog`, `intback_digital_buttons`, `intback_multitap`, `intback_multitap_p1`, `direct_mode` | byte-identical on both columns |
 | `intback_mouse` | passes the hardware column; `INFO` against Beetle on the payload bytes |
+| `intback_rtc_oscillator` | outside both columns by design; see the crystal-tolerance note below |
 | `intback_gamepad` | outside both columns by design; its recorded trace matches Beetle byte for byte |
 
 The one Beetle divergence is the documented mouse payload-length
@@ -121,6 +122,27 @@ the reference one. Its trace is recorded at
 ./build/tb ours intback_gamepad
 ```
 
+### Why `intback_rtc_oscillator` is in neither column
+
+`intback_gamepad` is outside both columns because nothing in the tree can
+derive a first-generation gamepad's report. `intback_rtc_oscillator` is
+outside them for the same reason and the same way: it runs the watch crystal
+5 % fast, and a synthetic tolerance has no hardware counterpart, so there is no
+source to derive the expected clock from. Writing down the value the model
+produced would be recording a measurement as a fact — the exact failure the
+`--` policy in `sim/gen_expect.py` exists to prevent.
+
+Both are registered in `tb_scenarios[]` and both run; each has a recorded
+trace at `sim/traces/<name>.beetle` to compare against by hand:
+
+```sh
+./build/tb ours intback_rtc_oscillator
+```
+
+The difference is that this one is meant to diverge. The reference backend
+has no crystal tolerance to set, so it reports the nominal time and ours does
+not — that gap *is* the test.
+
 ## Scope and non-goals
 
 **In scope.** A portable, allocation-free model of the SMPC register file,
@@ -157,7 +179,8 @@ Read this before trusting any figure above. Every row is checkable.
 | Limitation | Where to check it |
 |---|---|
 | The model is **data-correct, timing-untrusted**. No constant in `core/` was ever measured; all of them are Mednafen's, from a source this project shows is wrong about time. | `docs/timing-baseline.md` |
-| **The testbench's clock is 61× off and nothing can see it.** `sim/tb.c` hands the model the undivided SH-2 clock where `ss.c` hands it that clock times the divisor, so one video frame costs the model ~1.02 RTC seconds instead of 1/60. Measured at 61.2×. The harness therefore **cannot test any wall-clock behaviour**, and the models' *formulas* are correct — it is the argument that is wrong. | `docs/timing-baseline.md` |
+| The harness's clock argument was **61× wrong and is now fixed** — `tb_smpc_master_clock()` matches `ss.c`, and `intback_rtc_tick` checks it against the NTSC frame rate rather than against the model. But the harness still **cannot test any wall-clock behaviour**: the differ compares no timestamps, by design. | `docs/timing-baseline.md` |
+| The harness emits **28 MHz frames while the SMPC sits in its power-on 26 MHz mode** (nothing has issued CKCHG352), so a frame is worth 1.0654 model seconds. Beetle has the same mismatch, so neither column can see it. | `docs/timing-baseline.md` |
 | The controller-port **TH half-period is unknown and unknowable offline**. Nothing in `reference/` states it, and there is no hardware capture in the tree. It is the one number a real deployment would need first. | `docs/timing-baseline.md` |
 | **Only 3 of 8 device types** are exercised by a scenario: `3dpad`, `mouse`, `gamepad`. `WHEEL`, `MISSION`, `KEYBOARD` and `GUN` are implemented and untested — including `WHEEL`'s hysteresis thresholds, which are among the few genuinely *measured* numbers in the project. | `sim/tb.c`, `core/include/smpc/iodev.h` |
 | **No `SmpcEnv` callback is asserted.** All eight are recorded in the trace, and `differ.sh` never reads them, so `MSHON`/`SSHON`/`SNDON`/`CDON`/`NMIREQ`/`RESENAB` are checked only for the command byte they leave in `OREG[31]`. | `sim/differ.sh` (zero references to `EVT`) |
@@ -167,7 +190,7 @@ Read this before trusting any figure above. Every row is checkable.
 | Whether the SMPC **re-interrogates each multi-tap sub-slot** is unconfirmed: BlueRetro answers with a pre-assembled buffer, so it shows *what* the reply is, not *how* the SMPC asks. | `docs/controller-port.md` |
 | The port mode echoed in SR is read from **IREG0**, against the manual and now against 4 of the 7 implementations surveyed — including the FPGA core people actually run games on. The model sits on the minority side. | `docs/smpc-implementations.md` §1 |
 | The two port modes are **one field copied, not two fields**. If the chip carries a per-port mode, this model cannot produce SR bits 0-1 differing from bits 2-3. Found by reading `Saturn_MiSTer`, undocumented before. | `docs/smpc-implementations.md` §1b |
-| The RTC second is counted in **4 MHz core clocks, not the 32.768 kHz watch crystal** the chip uses, so the model inherits the core crystal's error (±~100 ppm) where the hardware gets ±~20 ppm — about ±3 150 s/year against ±630. Inherited from Mednafen, which does the same. | `docs/timing-baseline.md` |
+| The RTC second's **tolerance is now a parameter** (`smpc_set_rtc_oscillator`), but it defaults to 0 ppm — the core oscillator's rate, which is Mednafen's behaviour. A real deployment still has to set it, and the only test of a non-zero value uses a deliberately absurd 5%. | `docs/timing-baseline.md` |
 | **No battery, no supply monitor.** The core runs from the host *and* a CR2032, the RTC keeps counting with the console off, and IC25 raises interrupt 0 and wipes the save RAM when the battery is discharged. None of it is modelled; `rtc_valid` is a static flag that measures nothing. | `docs/timing-baseline.md` |
 | Pin D0's **16.384 kHz** output — the RTC oscillator divided by two, readable by the host in direct mode — does not exist in the model. | `docs/timing-baseline.md` |
 

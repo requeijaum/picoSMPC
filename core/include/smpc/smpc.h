@@ -174,6 +174,16 @@ void smpc_kill(Smpc *s);
 void smpc_set_rtc(Smpc *s, const struct tm *ht, uint8_t lang);
 void smpc_get_rtc(Smpc *s, uint8_t out[7]);
 void smpc_set_smem(Smpc *s, const uint8_t smem[4]);
+
+/*
+ * The RTC's tolerance, in parts per million, of the 32.768 kHz watch crystal
+ * on OSC1/OSC2.  That oscillator is a separate part from the 4 MHz one that
+ * clocks the core, so the two drift apart on a real console; 0 ppm, the
+ * default, is nominal and reproduces Mednafen's behaviour exactly.  The core
+ * has no notion of absolute time, so this does not make the model more
+ * accurate by itself -- it makes the model able to say which crystal it is
+ * imitating.  Survives smpc_reset(). */
+void smpc_set_rtc_oscillator(Smpc *s, int32_t ppm);
 void smpc_get_smem(Smpc *s, uint8_t out[4]);
 
 /* Peripherals.  Ports 0 and 1 are the front panel; 2..5 are the sub-slots
