@@ -1,0 +1,3 @@
+build/
+reference/smpc-emulator/
+*.o
