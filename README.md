@@ -138,6 +138,17 @@ console.
   pad-port half-period that no source states. Neither exists.
 - *Proving the model complete.* Three of eight device types and none of the
   environment callbacks are covered; see below.
+- *A third, cycle-accurate oracle.* Considered and rejected, for the record.
+  `Saturn_MiSTer/rtl/Saturn/SMPC/` contains a cycle-accurate HMCS400 core
+  together with `smpc.mif` — Sega's SMPC ROM, 2048 words of 10 bits. Pointed
+  at a Verilator build and driven through an interface shaped like this one's,
+  it would have been the only thing in reach that could have tested the
+  timing this project calls untrusted. Rejected because no HDL toolchain is
+  installed (no verilator, iverilog, yosys or ghdl), the ROM may not be
+  redistributed, and a SystemVerilog shim for the host bus, the pad port and
+  the VDP/SCU/sound stubs is a new subsystem rather than a small addition.
+  The three-stage peripheral model it contributes was adopted by reading; the
+  simulator was not built.
 
 ## Known limitations
 
@@ -153,6 +164,8 @@ Read this before trusting any figure above. Every row is checkable.
 | **Beetle is the only executable oracle for report framing.** MAME is consulted in prose only, and abrasive's HMCS400 work feeds no automated check. A bug inherited from MAME or Mednafen would pass *both* columns. | `docs/smpc-implementations.md` |
 | `intback_mouse` has **two bytes with no derivation**, and `intback_gamepad` is in neither column. Both are recorded as `--`, never guessed. | `sim/traces/*.expect` |
 | Whether the SMPC **re-interrogates each multi-tap sub-slot** is unconfirmed: BlueRetro answers with a pre-assembled buffer, so it shows *what* the reply is, not *how* the SMPC asks. | `docs/controller-port.md` |
+| The port mode echoed in SR is read from **IREG0**, against the manual and now against 4 of the 7 implementations surveyed — including the FPGA core people actually run games on. The model sits on the minority side. | `docs/smpc-implementations.md` §1 |
+| The two port modes are **one field copied, not two fields**. If the chip carries a per-port mode, this model cannot produce SR bits 0-1 differing from bits 2-3. Found by reading `Saturn_MiSTer`, undocumented before. | `docs/smpc-implementations.md` §1b |
 
 The recurring failure mode behind most of these is worth stating: a code path
 with no scenario is a code path where a bit-packing bug can live for months.

@@ -57,7 +57,7 @@ Two trees are fetched on demand by `tools/fetch-reference.sh` and are listed in
 | Path | Upstream | Terms | Why it is excluded |
 |---|---|---|---|
 | `reference/bluRetro/` | BlueRetro | Apache-2.0 | 3 MB of somebody else's history; only `main/wired/sega_io.c` is ever read |
-| `reference/smpc-emulator/` | abrasive, <https://codeberg.org/abrasive/smpc-emulator> | CC-BY | `dump/` contains **Sega's SMPC ROM** and `reference_docs/` contains the **Saturn Service Manual** and the Hitachi HMCS400 handbook. None of that is ours to redistribute. |
+| `reference/smpc-emulator/` | abrasive, <https://codeberg.org/abrasive/smpc-emulator> | CC-BY | `reference_docs/` carries a 42 MB vendor handbook and a 24 MB die trace. Somebody else's documents and megabytes of their repository history are not ours to redistribute. |
 
 Both carry attribution-only obligations, which this file and
 `reference/README.md` discharge. `tools/fetch-reference.sh` clones each from
@@ -68,6 +68,15 @@ written against without it weighing down the repository.
 hardware facts cited in `docs/timing-baseline.md` and `docs/controller-port.md`
 — it comes from a decap and the chip vendor's handbook, and is the only
 non-emulator source in the project.
+
+An earlier revision of this file claimed that the clone's `dump/` held Sega's
+SMPC ROM and that `reference_docs/` held the Saturn Service Manual. Neither is
+true of what the Codeberg repository actually serves: `dump/` is not there at
+all, and `reference_docs/` holds the Hitachi handbook, one datasheet and a die
+trace. The error was repeated from `reference/README.md`, which had claimed the
+two authoritative documents shipped in the clone. Both are corrected in place;
+they are recorded here because a provenance file that states something false is
+worse than one that says nothing.
 
 ## Sega and Hitachi material
 

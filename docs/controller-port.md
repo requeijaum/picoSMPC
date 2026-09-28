@@ -173,6 +173,62 @@ but the *existence* of a two-phase pre-TH identification is a hardware fact
 that no emulator models, and it is a plausible explanation for why the ID1
 de-scrambling looks the way it does.
 
+## The de-scrambler now has three independent implementations
+
+The ID nybble pair does not arrive in the order the bits are meant to be read;
+the master recombines adjacent bit pairs before comparing it against the ID
+taxonomy. This model implements that as `nibble_pair()` in
+`core/src/iodev.c`, and it is the single most confusing thing on the port:
+
+```c
+bit3 = ((hi >> 3) | (hi >> 2)) & 1;
+bit2 = ((hi >> 1) |  hi      ) & 1;
+bit1 = ((lo >> 3) | (lo >> 2)) & 1;
+bit0 = ((lo >> 1) |  lo      ) & 1;
+```
+
+Mednafen arrives at the same function by a different route, and so does
+Saturn_MiSTer, which writes it as a four-way reduction:
+
+```systemverilog
+MD_ID <= {|JOY_DATA[3:2], |JOY_DATA[1:0], |JOY_DATA[15:14], |JOY_DATA[13:12]};
+```
+
+Three implementations, two languages, one bit-identical function. That matters
+more than a fourth data point on the ID taxonomy, because it is the part where
+being *almost* right produces a plausible-looking model that decodes every
+common pad and fails on none: a wrong de-scrambler and a right one differ only
+in the two IDs nobody has a controller for. It is now the best-corroborated
+thing in this project, and it needs no further measurement.
+
+## The empty-port byte, and a third party's confirmed bug
+
+BlueRetro defines `ID1_NON_CONNECTION 0xF`, so an empty port reports `F` then
+`0` — the byte `0xF0`. This model reaches that from the id probe rather than
+from a constant: its unmatched-id arm writes the id's low nybble followed by
+`0`, so an empty port's `id1 == 0xF` lands on `F0`, and a Stunner's
+`id1 == 0xA` lands on `A0`.
+
+Saturn_MiSTer disagrees, and says so itself. `SMPC_HLE.sv:995` reads:
+
+```systemverilog
+PERI_OREG_DATA <= 8'hA0;//8'hF0; //temporary hack
+```
+
+It ships `A0` for the nothing-detected case with `F0` commented out beside it
+as the intended value. That is not a third opinion on the hardware — it is a
+third party carrying a known-wrong byte and flagging it. Against a driver
+running on real consoles, `F0` stands, and the commented-out half of that line
+is the useful part: somebody hit the same wall and wrote down which way the
+hardware actually goes.
+
+The two implementations also disagree on the Stunner (a third-party
+force-feedback adapter, `id1 == 0xA`). This model treats it as an
+unrecognised id and reports `A0`; Saturn_MiSTer folds `0xA` and `0xF` into one
+"nothing detected" state and reports `A0` there as well. Same bytes, different
+reasoning — and if the adapter is meant to be transparent, reporting it as
+absent is the bug and the coincidence hides it.
+
 ## Trigger thresholds
 
 ```c
