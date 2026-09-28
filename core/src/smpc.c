@@ -1139,6 +1139,12 @@ static void build_report_program(Smpc *s)
 
 	skip_tap = emit_if_tap(s, false);
 	emit(s, OP_SET_IDTAP_DIRECT, 0);
+	/* The sub-slot loop runs once for a device wired straight to the port,
+	 * just as it runs per-slot behind a multi-tap -- only the source of the
+	 * count differs.  Leaving ctr_max at zero here made the loop body
+	 * unreachable, so the device's own id and size nybbles were skipped and
+	 * the report came out as the raw id plus a zero size. */
+	emit(s, OP_SET_CTRMAX, (uint16_t)(CTR_TAP | (CTRMAX_IDTAP << 2) | (1 << 4)));
 	patch_if(s, skip_tap, (uint16_t)s->jr.prog_len);
 
 	emit(s, OP_REPEAT, 0);

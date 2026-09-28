@@ -16,6 +16,18 @@ Nothing in here is built or shipped.
   Sega's SMPC ROM: it is **not** needed for an HLE and must not end up in a
   firmware image.
 
+- `bluRetro/` — BlueRetro's `main/wired/sega_io.c`, a working Saturn
+  controller-port implementation driving real hardware, and `main/adapter/
+  wired/saturn.c`, which defines the report packets it serves. Clone it with:
+
+      git clone --depth 1 https://github.com/darthcloud/BlueRetro reference/bluRetro
+
+  This is the most valuable reference in the project, and the one that is
+  least like an emulator: it sits on the *peripheral* side of the port, so it
+  answers questions about the pins, the handshake and the packet formats that
+  no emulator can, and it contradicts Mednafen on several. See
+  `docs/controller-port.md`.
+
 The authoritative documents are `ST-169-R1-072694` (the SMPC manual) and page
 17 ("Main C/B - 5/6") of the Saturn Service Manual, which carries the IC9
 netlist. Both are in the abrasive clone's `reference_docs/`.

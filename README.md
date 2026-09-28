@@ -73,9 +73,11 @@ hw/       board notes.  Not started.
    that are genuinely counter-intuitive.
 2. `docs/timing-baseline.md` — every timing constant, where it came from, and
    the one that nobody knows.
-3. `core/include/smpc/smpc.h` — the register map and the environment seam.
-4. `core/src/smpc.c` — the command engine and the report sequencer.
-5. `sim/tb.c` — the scenarios, which are the actual specification.
+3. `docs/controller-port.md` — the controller port as answered by
+   BlueRetro, which drives real hardware and contradicts the emulators.
+4. `core/include/smpc/smpc.h` — the register map and the environment seam.
+5. `core/src/smpc.c` — the command engine and the report sequencer.
+6. `sim/tb.c` — the scenarios, which are the actual specification.
 
 ## Three findings worth knowing about up front
 
@@ -92,6 +94,11 @@ hw/       board notes.  Not started.
 - **INTBACK is a 4-bit-per-transfer DMA spanning a vblank, not a byte dump.**
   Every HLE gets this wrong. It is why the peripheral half of the report is
   built as an interpreted instruction stream rather than straight-line code.
+
+- **There is no SC or RMD line on the controller port.** Every emulator models
+  one. The Saturn-versus-Mega-Drive distinction is carried in the terminator
+  nybble of each transfer, and the four data lines are physically named
+  `R`, `L`, `D`, `U` — after the directions they drive — not `D0`-`D3`.
 
 ## Licence and provenance
 
