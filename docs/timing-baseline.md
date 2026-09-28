@@ -137,6 +137,57 @@ that measures nothing, and `docs/` records it as absent. Saturn_MiSTer's HLE is
 weaker still: its RTC is `EXT_RTC` from the FPGA's own clock, with no
 oscillator at all.
 
+## The testbench's clock is 61x off, and no test can see it
+
+`SMPC_ClockRatio` is computed exactly as Mednafen computes it, and the two
+formulas are character for character the same:
+
+```c
+SMPC_ClockRatio = (1ULL << 32) * 4000000 * CurrentClockDivisor / MasterClock;
+```
+
+What matters is therefore what `MasterClock` *is*, and here the harness and a
+real integration disagree. Mednafen's `ss.c` passes the SH-2 clock **already
+multiplied by the clock divisor** — `1 746 818 182` for NTSC, which is
+`28 636 364 * 61` — so the divisor in the formula cancels and the ratio comes
+out at `4e6 / 28.636364 MHz`, or 0.1397 core clocks per tick. Sixty video
+frames is one RTC second, as it must be.
+
+`sim/tb.c` passes the *undivided* SH-2 clock, `28 636 364`, so the divisor
+does not cancel: the ratio is 8.52 core clocks per tick, and one video frame
+comes to about `4 065 000` core clocks — roughly **1.02 RTC seconds per
+frame**. Measured directly, by running a scenario for 100 and 200 frames and
+differencing the clock: **61.2x**, which is `SMPC_CLOCK_DIVISOR_28M` to within
+the rounding. In 320 mode the error is 65x instead.
+
+So the model is right and the harness is wrong, and the two together are
+calibrated 61x away from the video the harness itself generates. Nothing
+detects it, for three independent reasons, which is what makes it worth
+writing down:
+
+- both backends are handed the same wrong argument, so the two columns agree
+  with each other perfectly;
+- `differ.sh` compares data and effect order and **never compares
+  timestamps** — that was a deliberate choice, to work around the clock-ratio
+  overflow documented above;
+- every scenario's *data* result is insensitive to it. INTBACK completes
+  either way; only the wall-clock cost of the `EAT_*` constants scales.
+
+The consequence is specific and worth stating plainly: **the harness cannot
+test any wall-clock behaviour at all.** Whether the report fits inside
+vblank, whether the reset debounce spans the right number of frames, whether
+`EAT_NYBBLE_SETTLE` is anywhere near the real pad timing — none of it is
+checkable here, and a scenario that asserted "after N frames the clock
+advanced M seconds" would be recording the 61x as if it were the answer.
+
+Fixing it is a one-line change — multiply by the divisor before calling
+`init`, matching `ss.c` — and it was not made here for two reasons. It shifts
+the timing of all eleven existing scenarios, none of which would then be
+reproducing anything measured; and the value it moves *towards* still cannot
+be validated without hardware, so the correction would replace one unverified
+timebase with another. It is recorded as a known defect rather than silently
+fixed.
+
 ## The one number that is not known
 
 **The controller-port TH half-period.** The `EAT_NYBBLE_SETTLE` of 50 clocks
