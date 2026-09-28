@@ -204,7 +204,8 @@ scenario reached it. Coverage, not correctness, is what this model is short of.
 ```
 core/     the model.  Portable C99, no dependencies, no allocation after init.
 sim/      testbench, golden-model harness, and the expectation generator.
-docs/     timing baseline and architecture notes.
+docs/     timing baseline, architecture notes, and session logs under
+          docs/notes/sessions/.
 tools/    fetch-reference.sh -- populates reference/ with the third-party trees.
 reference/  golden model and reverse-engineering material.  Not built.
 ```
@@ -255,6 +256,9 @@ DIFF_VERBOSE=1 ./sim/differ.sh   # with diffs
 5. `core/include/smpc/smpc.h` — the register map and the environment seam.
 6. `core/src/smpc.c` — the command engine and the report sequencer.
 7. `sim/tb.c` — the scenarios, which are the actual specification.
+8. `docs/notes/sessions/` — what happened and why, newest first. Start
+   with the most recent one: the open questions are listed there and they are
+   the parts of this project that are documentation rather than code.
 
 ## Four findings worth knowing about up front
 
