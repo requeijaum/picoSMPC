@@ -48,8 +48,16 @@ worth being precise about which is which rather than reading the count:
 - the front-panel port loop had no trip count, so it ran exactly once
 
 So: the command engine, the status report and the report sequencer's control
-flow are solid; the bytes the sequencer produces are not yet right. That is
-debugging inside a design that is in place, not missing design.
+flow are solid; the bytes the sequencer produces in the self-clocking block
+are not yet right. That is debugging inside a design that is in place, not
+missing design.
+
+The remaining divergence is narrow and reproducible: dump the OREG nybble
+writes with `./build/tb` under a debug build and compare against the expected
+`F1 02 FF FF F0`. The `id_tap` pair should be `0xF1` and is coming out as
+`0x05`, which means `OP_SET_IDTAP_DIRECT` is not taking effect where the
+program expects it. Everything before and after that point in the exchange is
+byte-correct.
 
 ## Build and test
 

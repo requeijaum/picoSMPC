@@ -161,8 +161,11 @@ enum
 	CTRMAX_PORTS		/* a literal: the two front-panel ports       */
 };
 
-/* Sources for OP_NYB.  A nybble is one of: a constant, one half of id1 or
- * id2, or one nybble of a byte in jr.work[]. */
+/*
+ * Sources for OP_NYB.  A nybble is one of: a constant, one half of id1 /
+ * id2 / id_tap, or one nybble of a byte in jr.work[], optionally OR'd with 7.
+ */
+
 enum
 {
 	SRC_CONST = 0,
@@ -610,9 +613,14 @@ static int line_dec(int v)
 	return (v & 3) == 0 ? -1 : ((v & 3) == 1 ? 0 : 1);
 }
 static void emit_sample(Smpc *s, int idx) { emit(s, OP_SAMPLE, (uint16_t)idx); }
-/* Sources are packed as kind | (index << 1) so a nybble descriptor fits in
- * the same 8 bits the register halves use. */
-static uint8_t pack_nyb(int kind, int index) { return (uint8_t)(kind | (index << 1)); }
+/*
+ * Sources are packed as kind | (index << 3), not kind | (index << 1).
+ * Three bits of index and three of kind fits a nybble descriptor in a byte,
+ * whereas one bit of kind does not: SRC_REG_LO is 2, so `desc & 1` read it
+ * as SRC_CONST and every low nybble of a register decode came out as a
+ * constant taken from the index field instead.
+ */
+static uint8_t pack_nyb(int kind, int index) { return (uint8_t)(kind | (index << 3)); }
 static void emit_nyb_const(Smpc *s, int v) { emit(s, OP_NYB, pack_nyb(SRC_CONST, v)); }
 static void emit_nyb_reg(Smpc *s, int reg, int high)
 {
@@ -634,8 +642,8 @@ static uint8_t reg_byte(Smpc *s, int reg)
 
 static uint8_t nyb_source(Smpc *s, uint8_t desc)
 {
-	const int kind = desc & 1;
-	const int arg = desc >> 1;
+	const int kind = desc & 0x07;
+	const int arg = (desc >> 3) & 0x07;
 
 	switch (kind) {
 	case SRC_CONST:    return (uint8_t)(arg & 0x0F);
