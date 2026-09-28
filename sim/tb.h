@@ -40,6 +40,14 @@ enum
 	TB_EXLE = 0x7F
 };
 
+/* Status register bits. */
+enum
+{
+	TB_SR_RESB = 0x10,	/* reset button held   */
+	TB_SR_NPE  = 0x20,	/* peripheral data remains */
+	TB_SR_PDL  = 0x40	/* first data block   */
+};
+
 enum
 {
 	TB_CLOCK_NTSC_352 = 0,	/* 28.636364 MHz, DOTSEL=1 */

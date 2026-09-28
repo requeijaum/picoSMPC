@@ -14,8 +14,8 @@ accept a USB HID controller in place of a physical one.
 |---|---|
 | 0 — references, timing baseline | done |
 | 1 — portable core skeleton + golden-model harness | done |
-| 2 — command engine, INTBACK, RTC/SMEM | **mostly done**; the peripheral-report path is still being finished |
-| 3 — pad protocol, multi-tap, virtual device | multi-tap and the self-clocking path work; the first-generation digital-pad path and the mouse do not yet match the reference |
+| 2 — command engine, INTBACK, RTC/SMEM | command engine, status report, SETTIME, SETSMEM, area code, reset debounce all match; the peripheral-report path is unfinished |
+| 3 — pad protocol, multi-tap, virtual device | the self-clocking device path matches; the first-generation digital-pad path, the mouse and multi-tap do not yet |
 | 4 — RP2350B firmware (PIO, timebase) | not started |
 | 5 — RTC/NVRAM/STE on hardware | not started |
 | 6 — hardware | not started |
@@ -23,6 +23,23 @@ accept a USB HID controller in place of a physical one.
 `sim/differ.sh` reports the current state. It compares our core against
 Mednafen's SMPC, which is compiled unmodified as a library — see
 `reference/beetle/README.md`.
+
+**2 of 9 scenarios pass.** The failures are not all the same kind, and it is
+worth being precise about which is which rather than reading the count:
+
+| Scenario | Divergence | Assessment |
+|---|---|---|
+| `settime_smem` | one bit of the SF open-bus read (`0x80` vs `0x10`) | every register byte, SR and every side effect match; the difference is which value last sat on the bus, so it is most likely a harness artifact of the INTBACK continue handshake, not a model difference — unconfirmed |
+| `intback_one_pad`, `intback_analog` | the report is cut short after two nybbles | real gap in the report engine |
+| `intback_mouse` | ID1 decode: 0x03 instead of 0xE3 | real gap in the mouse's id-nybble de-scrambling |
+| `intback_multitap` | the adapter header is read as a device id, then the sub-slot loop stalls | real gap in the multi-tap path |
+| `direct_mode` | the final INTBACK produces no report | real gap, same as the above |
+| `sysres_ckchg` | the scenario itself is broken (it drives the virtual clock backwards); both models fail it the same way, which is a harness bug, not a model one |
+
+So: the command engine and the status report are solid, the self-clocking
+device path is solid, and the remaining work is the multi-tap loop, the mouse
+id decode, and the first-generation digital-pad path. None of that is
+architectural — it is debugging inside a design that is now in place.
 
 ## Build and test
 
