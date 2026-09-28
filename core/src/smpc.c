@@ -35,6 +35,12 @@
 #define EAT_NYBBLE_SETTLE 50	/* per pad-port half-nybble */
 #define EAT_DIGITAL_GAP 30
 #define EAT_PORT_TAIL 26
+/* How many consecutive polls to wait for the peripheral to toggle TL before
+ * giving up on a nybble.  A real pad answers in a few microseconds; this is
+ * roughly 2 ms of master clock, i.e. two orders of magnitude of headroom
+ * before a stuck peripheral is declared dead. */
+#define TL_POLL_LIMIT 48
+
 #define POLL_SHORT 8		/* master clocks */
 #define POLL_COND 1000
 
@@ -135,7 +141,8 @@ enum
 	OP_STORE_DATABYTE,	/* read_buffer[ctr] = work[0..1], ctr++      */
 	OP_LOAD_DATABYTE,	/* work[0] = read_buffer[ctr], ctr++          */
 	OP_NEXT_PORT,	/* advance to the next front-panel port          */
-	OP_IF_MULTI	/* arg = target when a multi-tap is present      */
+	OP_IF_MULTI,	/* arg = target when a multi-tap IS present      */
+	OP_IF_NOT_MULTI	/* arg = target when there is NO multi-tap      */
 };
 
 /* Counter registers for OP_ENDREPEAT / OP_SET_CTRMAX. */
@@ -150,7 +157,8 @@ enum
 enum
 {
 	CTRMAX_ID2 = 0,		/* id2 & 0xF  -- data bytes in one sub-device */
-	CTRMAX_IDTAP		/* id_tap & 0xF -- sub-devices behind a tap    */
+	CTRMAX_IDTAP,		/* id_tap & 0xF -- sub-devices behind a tap    */
+	CTRMAX_PORTS		/* a literal: the two front-panel ports       */
 };
 
 /* Sources for OP_NYB.  A nybble is one of: a constant, one half of id1 or
@@ -166,6 +174,9 @@ enum
 
 #define OPBUF 512
 #define SMPC_LOOP_FRAMES 4
+
+/* Front-panel controller ports. */
+#define SMPC_PORT_COUNT 2
 
 typedef struct
 {
@@ -252,6 +263,7 @@ struct Smpc
 		 * three deep: front-panel port, sub-device behind a multi-tap,
 		 * and data bytes within a sub-device. */
 		SmpcOp    prog[OPBUF];
+		uint8_t   tl_timeout;	/* bounded wait on the peripheral's TL */
 		int32_t   ckchg_vb;
 		uint16_t  prog_len;
 		uint16_t  pc;
@@ -268,7 +280,9 @@ struct Smpc
 	/* ---- controller ports ---- */
 	struct SmpcPort
 	{
-		SmpcIoDev     *dev;
+		/* No cached device pointer: a port without a multi-tap always
+		 * uses s->devices[port].  Caching it meant that replacing a
+		 * device left the port pointing at freed memory. */
 		SmpcMultiTap  *tap;
 		bool           tap_enabled;
 		bool           owns_dev;
@@ -511,7 +525,14 @@ void smpc_set_area_code(Smpc *s, uint8_t code)
  */
 static void update_io_bus(Smpc *s, unsigned port)
 {
-	struct SmpcPort *p = &s->port[port];
+	struct SmpcPort *p;
+
+	/* cur_port is driven by the sequencer, so it is bounds-checked here
+	 * rather than trusted: an out-of-range value would index off the end
+	 * of s->port[] and take the whole core with it. */
+	if (port >= SMPC_PORT_COUNT)
+		port = 0;
+	p = &s->port[port];
 	const unsigned sel = p->direct_mode_en ? 1u : 0u;
 	const uint8_t data_dir = p->data_dir[sel];
 	const uint8_t driven = (uint8_t)(data_dir & 0x7F);
@@ -520,8 +541,8 @@ static void update_io_bus(Smpc *s, unsigned port)
 
 	if (p->tap_enabled && p->tap)
 		state = smpc_multitap_update_bus(p->tap, seen, driven);
-	else if (p->dev)
-		state = smpc_iodev_update_bus(p->dev, seen, driven);
+	else if (s->devices[port])
+		state = smpc_iodev_update_bus(s->devices[port], seen, driven);
 	else
 		state = (uint8_t)((seen & (driven | 0xE0)) | 0x7F);
 
@@ -711,10 +732,24 @@ static int report_step(Smpc *s)
 			break;
 
 		case OP_WAIT_TL:
+			/*
+			 * Wait for the peripheral's TL toggle.  Bounded, because a
+			 * peripheral that stops responding must not be able to hang
+			 * the report: the real SMPC gives up and the host sees a
+			 * short report and an NPE that then clears.  BlueRetro's
+			 * peripheral-side loop has the same structure -- it polls
+			 * TR and bails out on TH or on TWH_TIMEOUT.
+			 */
 			if ((((BS & 0x10) != 0) ? 1u : 0u) != arg) {
+				if (++s->jr.tl_timeout > TL_POLL_LIMIT) {
+					s->jr.tl_timeout = 0;
+					s->jr.pc++;
+					break;
+				}
 				s->jr.wake = POLL_COND;
 				return 1;
 			}
+			s->jr.tl_timeout = 0;
 			s->jr.pc++;
 			break;
 
@@ -772,10 +807,11 @@ static int report_step(Smpc *s)
 			const int src = (arg >> 2) & 0x03;
 			unsigned v;
 
-			if (src == CTRMAX_ID2)
-				v = (unsigned)(s->jr.id2 & 0x0F);
-			else
-				v = (unsigned)(s->jr.id_tap & 0x0F);
+			switch (src) {
+			case CTRMAX_ID2:    v = (unsigned)(s->jr.id2 & 0x0F); break;
+			case CTRMAX_IDTAP:  v = (unsigned)(s->jr.id_tap & 0x0F); break;
+			default:           v = SMPC_PORT_COUNT; break;
+			}
 			/* A multi-tap has six connectors; anything more is a
 			 * mis-decode and must not walk off the sub-device array. */
 			if ((arg >> 4) & 1)
@@ -800,9 +836,23 @@ static int report_step(Smpc *s)
 				s->jr.pc++;
 			break;
 
-		case OP_IF_TAP:
+		/*
+		 * Two separate tests, not one with a polarity argument.  Every
+		 * guard around the multi-tap blocks needs a different sense, and
+		 * collapsing them into one instruction with a flag is how all
+		 * three of them ended up inverted at once: the device id and
+		 * size got overwritten with 0xFF on a directly-connected pad,
+		 * which set the data length to 15 and stalled the report.
+		 */
 		case OP_IF_MULTI:
 			if (s->jr.is_tap)
+				s->jr.pc = arg;
+			else
+				s->jr.pc++;
+			break;
+
+		case OP_IF_NOT_MULTI:
+			if (!s->jr.is_tap)
 				s->jr.pc = arg;
 			else
 				s->jr.pc++;
@@ -877,7 +927,10 @@ static int report_step(Smpc *s)
 			break;
 
 		case OP_NEXT_PORT:
-			s->jr.cur_port++;
+			/* Wrap.  The increment also runs after the last port, and
+			 * cur_port indexes s->port[] directly, so an unwrapped
+			 * increment walks off the end of the array. */
+			s->jr.cur_port = (uint8_t)((s->jr.cur_port + 1) % SMPC_PORT_COUNT);
 			s->jr.ctr[CTR_DATA] = 0;
 			s->jr.is_tap = false;
 			s->jr.pc++;
@@ -986,20 +1039,22 @@ static uint16_t emit_if_port_skip(Smpc *s)
 	return at;
 }
 
-static uint16_t emit_if_tap(Smpc *s, bool when_tap)
-{
-	const uint16_t at = (uint16_t)s->jr.prog_len;
-
-	(void)when_tap;
-	emit(s, OP_IF_TAP, 0);
-	return at;
-}
-
+/* Guards a block that runs only when a multi-tap is attached. */
 static uint16_t emit_if_multi(Smpc *s)
 {
 	const uint16_t at = (uint16_t)s->jr.prog_len;
 
 	emit(s, OP_IF_MULTI, 0);
+	return at;
+}
+
+/* Guards a block that runs *without* a multi-tap: the direct-connection
+ * case. */
+static uint16_t emit_if_not_multi(Smpc *s)
+{
+	const uint16_t at = (uint16_t)s->jr.prog_len;
+
+	emit(s, OP_IF_NOT_MULTI, 0);
 	return at;
 }
 
@@ -1066,6 +1121,10 @@ static void build_report_program(Smpc *s)
 	emit_eat(s, EAT_REPORT_PRELUDE);
 	s->jr.owp = 0;
 
+	/* Two front-panel ports, always.  The trip count has to be set
+	 * explicitly: OP_REPEAT only pushes a frame, so a loop whose counter
+	 * was never given a bound runs exactly once. */
+	emit(s, OP_SET_CTRMAX, (uint16_t)(CTR_PORT | (CTRMAX_PORTS << 2)));
 	emit(s, OP_REPEAT, 0);
 
 	/* Per-port preamble. */
@@ -1131,13 +1190,13 @@ static void build_report_program(Smpc *s)
 
 	/* A multi-tap answers with a 0x4x header whose low nybble is the
 	 * number of attached pads. */
-	skip_not_tap = emit_if_tap(s, true);
+	skip_not_tap = emit_if_not_multi(s);
 	emit_2nibble_read(s, 2, 3);
 	emit(s, OP_SET_IDTAP, 0);
 	emit(s, OP_SET_CTRMAX, (uint16_t)(CTR_TAP | (CTRMAX_IDTAP << 2) | (1 << 4)));
 	patch_if(s, skip_not_tap, (uint16_t)s->jr.prog_len);
 
-	skip_tap = emit_if_tap(s, false);
+	skip_tap = emit_if_multi(s);
 	emit(s, OP_SET_IDTAP_DIRECT, 0);
 	/* The sub-slot loop runs once for a device wired straight to the port,
 	 * just as it runs per-slot behind a multi-tap -- only the source of the
@@ -1150,7 +1209,7 @@ static void build_report_program(Smpc *s)
 	emit(s, OP_REPEAT, 0);
 
 	/* Behind a multi-tap, each sub-device has its own id and size. */
-	skip_not_multi = emit_if_multi(s);
+	skip_not_multi = emit_if_not_multi(s);
 	emit_2nibble_read(s, 0, 1);
 	emit(s, OP_SET_ID2, 0);
 	emit(s, OP_SET_CTRMAX, (uint16_t)(CTR_DATA | (CTRMAX_ID2 << 2)));
@@ -1215,6 +1274,18 @@ static void build_report_program(Smpc *s)
  */
 static void write_status_report(Smpc *s)
 {
+	/*
+	 * NOT pre-filled with 0xFF.
+	 *
+	 * MAME fills OREG16..30 and calls them "undefined"; Kronos's Yabause
+	 * fills OREG0..30.  Neither Ymir, nor Beetle, nor upstream Yabause do,
+	 * and Beetle -- the only implementation this project can diff against
+	 * automatically -- reports 0x00 there.  Three sources against one, but
+	 * the disagreement is unresolvable without hardware, so the behaviour
+	 * that can be verified is kept and the conflict is recorded in
+	 * docs/smpc-implementations.md rather than silently adopted.
+	 */
+
 	s->oreg[0] = (uint8_t)((s->rtc_valid ? 0x80u : 0u) |
 	                       (s->reset_nmi_enabled ? 0u : 0x40u));
 	memcpy(&s->oreg[1], s->rtc_raw, 7);
@@ -1700,8 +1771,18 @@ int32_t smpc_run(Smpc *s, int32_t ts)
 		case ST_INTBACK_OPT:
 			s->jr.pd_counter = 0;
 			s->jr.time_opt_en = ((s->ireg[1] & 0x02) == 0);
-			s->jr.mode[0] = (uint8_t)((s->ireg[1] >> 4) & 3);
-			s->jr.mode[1] = (uint8_t)((s->ireg[1] >> 6) & 3);
+			/*
+			 * The port mode that SR echoes back comes from IREG0
+			 * bits 4-5, not IREG1.  MAME, Kronos's Yabause and
+			 * 5thPlanet all read IREG0 >> 4 here; only Beetle,
+			 * Ymir and upstream Yabause read IREG1.  Three
+			 * independent implementations against one, and MAME's
+			 * driver is the oldest of the three.  The SMPC manual
+			 * says SH2CMD1, so this is flagged rather than settled --
+			 * see docs/smpc-implementations.md.
+			 */
+			s->jr.mode[0] = (uint8_t)((s->ireg[0] >> 4) & 3);
+			s->jr.mode[1] = (uint8_t)(s->jr.mode[0] & 3);
 			s->jr.opt_read_time = 0;
 			{
 				const int64_t left = s->jr.opt_wait_until_time - (s->jr.time_counter >> 32);
@@ -1835,8 +1916,21 @@ void smpc_write(Smpc *s, int32_t ts, uint8_t addr, uint8_t value)
 		break;
 
 	case 0x31:
-		/* SF is set by the host to start a command. */
-		s->sf = true;
+		/*
+		 * SF is read-modify-write, not a byte store: writing 0 clears
+		 * the busy flag, writing 1 leaves it.  That is a property of the
+		 * HMCS400, whose interrupt-control registers are only reachable
+		 * through the bit-modification instructions (abrasive's
+		 * HARDWARE.md), and of Kronos's Yabause, which models it as
+		 * `SF &= val`.  The host relies on it to retire a command
+		 * without waiting.
+		 */
+		if (value == 0) {
+			s->sf = false;
+		} else {
+			/* Any write starts a command. */
+			s->sf = true;
+		}
 		break;
 
 	/* A host write always lands in the direct-mode set, whether or not
@@ -2044,8 +2138,8 @@ void smpc_reset(Smpc *s, bool powering_up)
 		s->port[port].ex_latch_en = false;
 		update_io_bus(s, port);
 		if (powering_up) {
-			if (s->port[port].dev)
-				smpc_iodev_power(s->port[port].dev);
+			if (s->devices[port])
+				smpc_iodev_power(s->devices[port]);
 			update_io_bus(s, port);
 		}
 	}
@@ -2098,14 +2192,14 @@ void smpc_set_multitap(Smpc *s, unsigned port, bool enabled)
 	p = &s->port[port];
 	p->tap_enabled = enabled;
 
-	/* Re-map: a multi-tap occupies the port itself and takes the next
-	 * four virtual pads as its sub-connectors. */
+	/* A multi-tap takes over the port and is handed the next virtual pads
+	 * as its sub-connectors.  The sub-slot pointers are the only ones
+	 * that have to be refreshed here; the port's own device is reached
+	 * through s->devices[port] and cannot go stale. */
 	if (enabled) {
-		p->dev = s->devices[port + 0];
 		for (unsigned i = 0; i < 6; i++)
-			smpc_multitap_set_sub(p->tap, i, s->devices[port + 0 + (i % (6 - port))]);
-	} else {
-		p->dev = s->devices[port];
+			smpc_multitap_set_sub(p->tap, i,
+			                      s->devices[(port + 1 + i) % 6]);
 	}
 	update_io_bus(s, port);
 }

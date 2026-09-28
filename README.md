@@ -24,7 +24,10 @@ accept a USB HID controller in place of a physical one.
 Mednafen's SMPC, which is compiled unmodified as a library — see
 `reference/beetle/README.md`.
 
-**2 of 9 scenarios pass.** The failures are not all the same kind, and it is
+**2 of 9 scenarios pass.**  The peripheral-report path now runs to completion
+and pulses its interrupts correctly, but the bytes it writes are still wrong.
+Four real defects were fixed along the way — all found by reading other
+implementations, not by the harness: The failures are not all the same kind, and it is
 worth being precise about which is which rather than reading the count:
 
 | Scenario | Divergence | Assessment |
@@ -36,10 +39,17 @@ worth being precise about which is which rather than reading the count:
 | `direct_mode` | the final INTBACK produces no report | real gap, same as the above |
 | `sysres_ckchg` | the scenario itself is broken (it drives the virtual clock backwards); both models fail it the same way, which is a harness bug, not a model one |
 
-So: the command engine and the status report are solid, the self-clocking
-device path is solid, and the remaining work is the multi-tap loop, the mouse
-id decode, and the first-generation digital-pad path. None of that is
-architectural — it is debugging inside a design that is now in place.
+- a use-after-free: a port cached a device pointer that `smpc_set_peripheral`
+  then freed
+- an out-of-bounds index: `cur_port` was incremented without wrapping and
+  indexes `s->port[]` directly
+- three multi-tap guards with their sense inverted, so a directly-connected
+  pad's id and size were overwritten with `0xFF` and its data length became 15
+- the front-panel port loop had no trip count, so it ran exactly once
+
+So: the command engine, the status report and the report sequencer's control
+flow are solid; the bytes the sequencer produces are not yet right. That is
+debugging inside a design that is in place, not missing design.
 
 ## Build and test
 
@@ -75,9 +85,11 @@ hw/       board notes.  Not started.
    the one that nobody knows.
 3. `docs/controller-port.md` — the controller port as answered by
    BlueRetro, which drives real hardware and contradicts the emulators.
-4. `core/include/smpc/smpc.h` — the register map and the environment seam.
-5. `core/src/smpc.c` — the command engine and the report sequencer.
-6. `sim/tb.c` — the scenarios, which are the actual specification.
+4. `docs/smpc-implementations.md` — how the four SMPC models in this tree
+   disagree, and which side this project takes and why.
+5. `core/include/smpc/smpc.h` — the register map and the environment seam.
+6. `core/src/smpc.c` — the command engine and the report sequencer.
+7. `sim/tb.c` — the scenarios, which are the actual specification.
 
 ## Three findings worth knowing about up front
 
